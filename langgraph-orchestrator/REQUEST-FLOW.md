@@ -401,8 +401,8 @@ olmazsa LangGraph anahtarlari duser ve dedup/fail-fast/page-chase sifirlanir.
 |---|---|
 | Exact duplicate | Tool calistirilmaz, farkli class/filter istenir |
 | Page-chase (buyuk sonuc ailesi) | Ayni path+filter icin ek page ilerletme engellenir |
-| 3 ardisik bos/hata | Fail-fast son cevap uretilir |
-| 30 adim | `_max_iter_fallback()` observations ile deterministik ozet uretir |
+| 3 ardisik bos/hata (veri bulunduysa 5) | Sorgu durur; `_synthesize_final_answer()` o ana kadar gelen TUM sonuclari tek LLM cagrisiyla yorumlar, hepsi bossa "bulamadim" der |
+| 30 adim | Ayni sentez yapilir; LLM hata verirse `_max_iter_fallback()` deterministik ozet uretir |
 | Bozuk JSON action | En fazla 2 kez modele sadece duzeltilmis JSON'u yeniden basmasi soylenir |
 | Plain prose | JSON action'a benzemiyorsa dogrudan final answer kabul edilir |
 | Write tool | Kesinlikle calistirilmaz |
@@ -686,7 +686,8 @@ definition tree'si kurar.
 
 Intent `copy_epg_bindings` ise `_build_copy_bindings()` calisir.
 
-1. Source ve destination dict'leri zorunludur.
+1. Source tek port, `destinations` bir LISTEDIR (10-15+ hedef olabilir; eski
+   tekil `destination` da kabul edilir). Ikisi de zorunludur.
 2. Ic node/node2 adlari `resolve_node_name()` ile cozulur.
 3. `resolve_port_ref(source)` kaynak tDn veya tDn'leri bulur.
 4. Her kaynak path icin `read_bindings_on_path(tdn)` cagrilir:
@@ -694,10 +695,13 @@ Intent `copy_epg_bindings` ise `_build_copy_bindings()` calisir.
    - DN'den tenant/ap/epg,
    - attribute'lardan encap ve mode.
 5. Duplicate binding spec'leri set ile tekillestirilir.
-6. `resolve_port_ref(destination)` hedef tDn veya tDn'leri bulur.
-7. Source ve destination path setleri kesisiyorsa islem reddedilir.
-8. `build_copy_bindings(specs, dst_tdns, user_input)` her kaynak binding'i her
-   hedef path icin korunan encap/mode ile atomik `polUni` tree'sine cevirir.
+6. Her hedef icin `resolve_port_ref()` tDn veya tDn'leri bulur. Cozulemeyen,
+   kaynakla ayni olan veya tekrar eden hedef atlanir ve plan payload'inda
+   `skipped_destinations` olarak gosterilir; hicbir hedef cozulemezse islem
+   reddedilir.
+7. `build_copy_bindings(specs, dst_tdns, ...)` her kaynak binding'i her hedef
+   path icin korunan encap/mode ile tek atomik `polUni` POST'una cevirir.
+   Onay ekranindaki payload ozet halindedir (binding listesi + hedef listesi).
 
 Kopyalama additive merge'dir; hedefteki mevcut binding'leri silmez.
 
@@ -921,7 +925,8 @@ Node'lar exception firlatmak yerine mumkun oldugunca state parcasi dondurur:
 `GraphState.errors` ve `GraphState.trail` listeleri reducer ile birikir. Create
 prepare'da error varsa `on_message()` problemi gosterir ve DN yoksa durur.
 Agentic tool exception'lari model context'ine structured result olarak girer;
-uc ardisik bos/hata fail-fast'i tetikler.
+uc ardisik bos/hata (veri bulunduysa bes) fail-fast'i tetikler ve toplanan
+kanitlardan son cevap sentezlenir.
 
 MCP runtime startup hatalari farkli davranir:
 

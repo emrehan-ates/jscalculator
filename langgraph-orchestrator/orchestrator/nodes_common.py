@@ -178,9 +178,9 @@ DETERMINISTIC CREATE (POST) — write operations, approval-gated:
 - define_port — create a port definition (access policy chain): policy group +
   interface profile + selector + port block, then attach to a switch profile.
   Supports access, port-channel (pc), and vPC.
-- copy_epg_bindings — copy ALL EPG static bindings from one port to another
-  port in one operation (additive merge; never deletes). Ports may be given as
-  device serials or as explicit leaf+port.
+- copy_epg_bindings — copy ALL EPG static bindings from one source port to ONE
+  OR MANY destination ports (10, 15 or more) in one operation (additive merge;
+  never deletes). Ports may be given as device serials or as explicit leaf+port.
 - copy_port_definition — create a NEW port definition by copying ALL access-
   policy config (type access/pc/vpc, AEP, and every policy: CDP/LLDP/link level/
   storm/STP/LACP) from an EXISTING port, onto a NEW leaf+port the user gives.
@@ -230,7 +230,8 @@ Respond ONLY with a JSON object. Examples:
 {"intent": "define_port", "flow": "create", "params": {"name": "MY_PC", "port_type": "pc", "nodes": ["125"], "ports": ["eth1/47", "eth1/48"], "aep": "SOME_AEP"}, "target_class": "infraAccBndlGrp"}
 {"intent": "define_port", "flow": "create", "params": {"name": "DR1_HOST", "port_type": "vpc", "nodes": ["DR1-C6-8", "DR1-C7-8"], "ports": ["eth1/1"], "aep": "DR1_AEP"}, "target_class": "infraAccBndlGrp"}
 {"intent": "bind_epg", "flow": "create", "params": {"epgs": ["PROD_DB"], "mode": "trunk", "bindings": [{"node": "DR2-B05-10", "port": "eth1/5"}]}, "target_class": "fvRsPathAtt"}
-{"intent":"copy_epg_bindings","flow":"create","params":{"source":{"node":"DR1-C6-8","port":"eth1/12"},"destination":{"node":"103","port":"eth1/14"}},"target_class":"fvRsPathAtt"}
+{"intent":"copy_epg_bindings","flow":"create","params":{"source":{"node":"DR1-C6-8","port":"eth1/12"},"destinations":[{"node":"103","port":"eth1/14"}]},"target_class":"fvRsPathAtt"}
+{"intent":"copy_epg_bindings","flow":"create","params":{"source":{"serial":"MSY_CX124553KT"},"destinations":[{"serial":"CX2204300RT"},{"serial":"CZ24160G9N"},{"node":"101","port":"eth1/5"}]},"target_class":"fvRsPathAtt"}
 {"intent":"copy_port_definition","flow":"create","params":{"name":"CZ241809QS","source":"CZ241908H2","nodes":["125"],"ports":["eth1/47"]},"target_class":"infraAccPortGrp"}
 {"intent": "agentic", "flow": "agentic", "params": {}, "target_class": ""}
 
@@ -276,10 +277,15 @@ PARAM RULES:
   invent the AEP; it must come from the user.
   NOTE: "nodes" entries may be switch hostnames (e.g. "DR1-C6-8") instead of
   numeric IDs — the system resolves them automatically.
-- copy_epg_bindings: extract "source" and "destination". Each is either
+- copy_epg_bindings: extract "source" (ONE port) and "destinations" (a LIST —
+  even a single destination is a list; include EVERY destination the user
+  names, there may be 10, 15 or more). Each port entry is either
   {"serial": "<device serial, keep the MSY_ prefix if the user wrote it>"} OR
-  {"node": "<leaf id>", "port": "eth1/x"}. NEVER invent tenant, app_profile,
-  encap, or mode — they are read from the source port automatically.
+  {"node": "<leaf id>", "port": "eth1/x"} OR an explicit vPC
+  {"node": "<n1>", "node2": "<n2>", "policy_group": "<bundle>"}. If the user
+  gives several ports on the same leaf ("101 eth1/5, eth1/6"), make one entry
+  per port. NEVER invent tenant, app_profile, encap, or mode — they are read
+  from the source port automatically. NEVER invent a destination.
 - copy_port_definition: extract "name" (the NEW port's TEAM_SERIAL name),
   "source" (the existing port/device serial to copy from — substring match, keep
   any TEAM_ prefix), "nodes" (LIST of leaf IDs for the NEW port; the program

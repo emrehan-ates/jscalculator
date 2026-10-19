@@ -39,6 +39,9 @@ class GraphState(TypedDict, total=False):
     # Consecutive empty/failed tool results this turn; fail-fast when high.
     # Plain last-write int (same pattern as agent_malformed_retries).
     agent_empty_streak: int
+    # True once any APIC call this turn returned data; raises the fail-fast
+    # threshold so empty enrichment lookups don't cut a productive walk short.
+    agent_had_data: bool
     # Compact evidence lines captured from executed tool calls; used to build
     # a deterministic fallback final answer when the loop hits its max step cap.
     agent_observations: list

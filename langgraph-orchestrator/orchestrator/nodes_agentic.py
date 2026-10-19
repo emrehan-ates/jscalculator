@@ -9,9 +9,10 @@ markdown skills exposed through the `skills` MCP server.
 Improvements over the basic loop:
   - dedup: the exact same (tool, arguments) is never executed twice; the agent
     is told it already tried it and must try something different or finalize.
-  - fail-fast: after N consecutive empty/failed tool results, stop and give an
-    honest final answer instead of looping to the iteration cap (the cause of
-    the soft timeouts).
+  - fail-fast: after N consecutive empty/failed tool results, stop querying
+    and make ONE final LLM call that interprets everything gathered so far
+    (also used when the iteration cap is hit). If every query came back empty
+    it says honestly that the object was not found.
   - explicit 0-result feedback so the agent changes class/filter, not repeats.
   - structure-aware tool-output formatting: APIC responses always lead with an
     authoritative totalCount/object-count header and are serialized compactly,
@@ -38,6 +39,9 @@ _plan_logger = logging.getLogger("aci_kb.plan")
 
 MAX_AGENT_ITERATIONS = 30
 FAIL_FAST_EMPTY = 3            # stop after this many empty/failed results in a row
+# Once the turn already has real data, a few empty enrichment lookups are
+# normal (e.g. walking several interface profiles); allow a longer streak.
+FAIL_FAST_EMPTY_WITH_DATA = 5
 # How many times per turn to nudge the model to re-emit when it returns
 # JSON-looking output that fails to parse (missing leading '{', unescaped inner
 # quotes, truncation). Beyond this we stop retrying and use the text as-is.
@@ -82,6 +86,12 @@ HOW TO WORK
   for non-English input where the hint may be wrong or missing.
 - If nothing in the list clearly fits, read the "generic_investigation" skill
   for a generic read-only investigation procedure instead of guessing.
+- "What is X / X nedir / X'i özetle" → aci_object_summary. Relations between
+  port, policy group, AEP, phys/VMM domain and VLAN pool → aci_access_policy_chain.
+  EPG static bindings / EPGs on a port or server → aci_epg_bindings. Server
+  serials, MSY_/CSY_/SG_ names and other site naming → aci_naming_conventions.
+- Contracts are out of scope (vzAny permitAny): never query vz* classes,
+  fvRsCons or fvRsProv.
 - NEVER fabricate DNs, node IDs, or filter values. Resolve them from actual
   APIC data first. For example, if asked about faults for a named policy group,
   you MUST resolve the name to leaf node+port values (see the
@@ -119,9 +129,10 @@ FINDING A NAMED OBJECT (important)
 - A name or label (e.g. "HOST-101", "MSY_SWProf") is NOT necessarily an
   endpoint. Only treat something as an endpoint (fvCEp) when it is a MAC address.
 - When asked to find / locate / "where is" an object by name and you don't know
-  its type, read the "object_lookup" skill and follow it: query several object
-  classes by name AND description, using a filter like
-  or(eq(<class>.name,"X"),wcard(<class>.descr,"X")).
+  its type, read the "aci_naming_conventions" skill: it tells which class a
+  name pattern belongs to (serial / MSY_<SERIAL> -> interface profile or PC/vPC
+  policy group, never an EPG). Then query the likely classes by name AND
+  description, e.g. or(eq(<class>.name,"X"),wcard(<class>.descr,"X")).
 - Try a DIFFERENT class or filter on each step.
 
 SWITCH NAME RESOLUTION (important)
@@ -153,9 +164,20 @@ POLICY GROUP OF A KNOWN PORT (important)
 
 DISCIPLINE (the loop enforces these)
 - Never call the same tool with the same arguments twice — it will be blocked.
-- If several lookups in a row return nothing, STOP and give a final_answer that
-  honestly states what you searched and that it was not found. Do not keep
-  guessing.
+- If several lookups in a row return nothing, STOP and give a final_answer.
+  Do not keep guessing.
+
+FINAL ANSWER RULES
+- Interpret EVERY tool result of this turn, not only the last one: report what
+  was found (with the real APIC values), then what came back empty or was not
+  checked. A partial chain (e.g. port -> policy group found, AEP lookup empty)
+  is a useful answer — give it.
+- An empty result means "nothing matched that exact filter", not proof that
+  the object does not exist; say which lookup was empty.
+- Only when EVERY lookup was empty or failed: say plainly that you could not
+  find it / do not know, list what you searched, and suggest how to narrow it.
+  Never invent values to fill gaps.
+- Answer in the user's language (Turkish or English).
 - Minimize APIC calls: one read_skill when needed, then follow it; reuse prior
   results; sample with small page-size instead of paging through history logs.
 - After a LARGE RESULT sample on the same path+filter, further page-only
@@ -164,7 +186,7 @@ DISCIPLINE (the loop enforces these)
 EXAMPLES
 
 Read a skill that looks relevant from the AVAILABLE SKILLS list:
-{"action": "tool_call", "tool": "read_skill", "arguments": {"skill_name": "object_lookup"}}
+{"action": "tool_call", "tool": "read_skill", "arguments": {"skill_name": "aci_object_summary"}}
 
 Find a named object across classes (name + description):
 {"action": "tool_call", "tool": "apic_get", "arguments": {"path": "/api/node/class/infraAccPortP.json", "params": {"query-target-filter": "or(eq(infraAccPortP.name,\\"HOST-101\\"),wcard(infraAccPortP.descr,\\"HOST-101\\"))"}}}
@@ -404,6 +426,54 @@ def _max_iter_fallback(observations, called):
         f"{tried}. Lütfen kapsamı daralt (obje tipi/isim) ve tekrar deneyelim."
     )
 
+_SYNTHESIS_INSTRUCTION = (
+    "STOP — no more tool calls are allowed ({reason}). Write the final answer "
+    "NOW from ALL tool results above in this turn, following the FINAL ANSWER "
+    "RULES: first what was found (real APIC values), then which lookups came "
+    "back empty or were not checked. If EVERY APIC lookup was empty or failed, "
+    "say plainly that you could not find it / do not know and list what you "
+    "searched. Do not invent anything. Respond with ONLY "
+    '{{"action": "final_answer", "answer": "<answer>"}}.'
+)
+
+
+def _not_found_answer(called, streak):
+    return (
+        f"I could not find what you asked for. I ran {len(called)} lookups "
+        f"and the last {streak} returned nothing. Tried: "
+        + "; ".join(called)
+        + ". The object may not exist under these names, or it may be a type "
+        "I did not query. Tell me the object type and I can query it directly."
+    )
+
+
+async def _synthesize_final_answer(llm, messages, reason, fallback):
+    """One last LLM call that turns every tool result gathered this turn into
+    the final answer (partial evidence included). `fallback` is a zero-arg
+    callable returning a deterministic answer, used only if the LLM call fails
+    or returns nothing usable."""
+    try:
+        response = await llm.ainvoke(
+            list(messages)
+            + [HumanMessage(content=_SYNTHESIS_INSTRUCTION.format(reason=reason))]
+        )
+        text = response.content if isinstance(response.content, str) else str(response.content)
+        try:
+            action = extract_json_from_llm(text)
+            if isinstance(action, dict):
+                if action.get("action") == "final_answer" and action.get("answer"):
+                    text = str(action["answer"])
+                elif action.get("action") == "tool_call":
+                    text = ""  # model ignored the instruction
+        except (ValueError, json.JSONDecodeError):
+            pass  # plain prose is an acceptable final answer
+        if text.strip():
+            return text.strip()
+    except Exception as e:
+        logging.getLogger(__name__).warning("final synthesis failed: %s", e)
+    return fallback()
+
+
 # Keywords used ONLY as an advisory hint for skill routing (see
 # _load_relevant_skills). The key is a substring of the skill filename (after
 # stripping "aci_" prefix and ".md" suffix); the value is a list of lowercase
@@ -415,41 +485,55 @@ def _max_iter_fallback(observations, called):
 _SKILL_KEYWORDS = {
     "fault_investigation": [
         "fault", "alarm", "wrong", "error", "healthy", "health",
-        "what is wrong", "troubleshoot",
+        "what is wrong", "troubleshoot", "hata", "arıza", "sağlık",
     ],
     "endpoint_troubleshooting": [
-        "endpoint", "mac", "reachab", "connect", "learned",
+        "endpoint", "mac", "reachab", "learned",
     ],
     "interface_troubleshooting": [
-        "interface", "port", "eth", "down", "flap", "link", "physical",
+        "interface down", "port down", "down", "flap", "crc", "fcs",
+        "link", "physical", "speed", "kapalı",
     ],
     "access_policy_chain": [
         "policy group", "policy grubu", "policygroup", "interface policy",
-        "port channel", "vpc", "access policy", "policy chain", "aep",
-        "hangi policy", "which policy",
+        "access policy", "policy chain", "aep", "attachable", "vlan pool",
+        "physical domain", "phys dom", "vmm domain", "hangi policy",
+        "which policy", "ilişki", "relation",
     ],
-    "epg_deployment": [
-        "epg", "binding", "binded", "deploy", "bound", "static bind",
+    "epg_bindings": [
+        "static binding", "static bind", "binding", "bound", "bind edil",
+        "bağlı epg", "hangi epg", "which epg", "epgs on", "epg'ler",
+        "deploy", "fvifconn",
+    ],
+    "object_summary": [
+        "summar", "özet", "nedir", "what is", "properties", "özellik",
+        "detail", "detay", "config of", "konfigürasyon", "anlat",
+    ],
+    "naming_conventions": [
+        "msy_", "csy_", "sg_", "serial", "seri no", "naming",
+    ],
+    "resolve_identifier": [
+        "where is", "nerede", "hangi port", "which port", "connected to",
+        "bağlı olduğu", "locate", "find server", "sunucu",
     ],
     "inventory_validation": [
         "count", "how many", "inventory", "total", "kaç adet", "kaç tane", "sayısı",
     ],
-    "object_lookup": [
-        "where is", "find", "locate", "search for",
-    ],
-    "search_techniques": [
+    "query_syntax": [
         "filter", "wcard", "query",
     ],
-    "object_inspection": [
-        "inspect", "children", "subtree", "detail",
-        "policy group", "policy grubu", "properties of",
-    ],
     "connectivity_between_endpoints": [
-        "path between", "reachability", "can reach", "connectivity",
+        "path between", "reachability", "can reach", "connectivity", "erişim",
     ],
     "switch_name_resolution": [
         "switch name", "node name", "leaf name", "spine name", "resolve switch",
         "switch id", "node id for", "fabric node",
+    ],
+    "vmm_visibility": [
+        "vcenter", "esxi", "virtual machine", " vm ", "hypervisor",
+    ],
+    "vpc_health": [
+        "vpc", "port-channel", "port channel", "peer link",
     ],
 }
 
@@ -610,6 +694,7 @@ async def prepare_agent(state):
         "agent_called": [],
         "agent_observations": [],
         "agent_empty_streak": 0,
+        "agent_had_data": False,
         "agent_large_query_families": [],
         "agent_malformed_retries": 0,
         "selected_skills": hinted_skills,
@@ -720,13 +805,18 @@ async def think_and_act(state):
     called = list(state.get("agent_called", []))
     observations = list(state.get("agent_observations", []))
     empty_streak = state.get("agent_empty_streak", 0)
+    had_data = state.get("agent_had_data", False)
     large_families = list(state.get("agent_large_query_families", []))
 
     if iteration >= MAX_AGENT_ITERATIONS:
+        answer = await _synthesize_final_answer(
+            llm, messages, f"the {MAX_AGENT_ITERATIONS}-step limit was reached",
+            lambda: _max_iter_fallback(observations, called))
         return {
-            "agent_final_answer": _max_iter_fallback(observations, called),
+            "agent_final_answer": answer,
+            "agent_messages": [AIMessage(content=answer)],
             "agent_iterations": iteration,
-            "trail": [f"think_and_act: hit max iterations ({MAX_AGENT_ITERATIONS})"],
+            "trail": [f"think_and_act: hit max iterations ({MAX_AGENT_ITERATIONS}), synthesized"],
         }
 
     response = await llm.ainvoke(messages)
@@ -865,6 +955,9 @@ async def think_and_act(state):
         called.append(sig)
         empty = _is_empty_or_error(result)
         new_streak = empty_streak + 1 if empty else 0
+        # Only APIC data counts as evidence (a read_skill result is not).
+        if not empty and tool_name != "read_skill":
+            had_data = True
         observations.append(_capture_observation(tool_name, arguments, result))
         if len(observations) > OBSERVATION_LIMIT:
             observations = observations[-OBSERVATION_LIMIT:]
@@ -879,35 +972,39 @@ async def think_and_act(state):
         ):
             large_families.append(family)
 
-        # FAIL-FAST: too many empty/failed results in a row
-        if new_streak >= FAIL_FAST_EMPTY:
+        result_str = _format_tool_result(result)
+        note = "(0 results — try a DIFFERENT class or filter) " if empty else ""
+        step_messages = [
+            AIMessage(content=raw_content),
+            HumanMessage(content=f"{note}Tool result for {tool_name}:\n{result_str}"),
+        ]
+
+        # FAIL-FAST: too many empty/failed results in a row → stop querying and
+        # interpret everything gathered so far in one final LLM call.
+        limit = FAIL_FAST_EMPTY_WITH_DATA if had_data else FAIL_FAST_EMPTY
+        if new_streak >= limit:
+            answer = await _synthesize_final_answer(
+                llm, messages + step_messages,
+                f"the last {new_streak} lookups returned nothing",
+                lambda: _not_found_answer(called, new_streak))
             return {
-                "agent_final_answer": (
-                    f"I could not find what you asked for. I ran {len(called)} lookups "
-                    f"and the last {new_streak} returned nothing. Tried: "
-                    + "; ".join(called)
-                    + ". The object may not exist under these names, or it may be a type "
-                    "I did not query. Tell me the object type and I can query it directly."
-                ),
+                "agent_final_answer": answer,
+                "agent_messages": step_messages + [AIMessage(content=answer)],
                 "agent_called": called,
                 "agent_observations": observations,
                 "agent_empty_streak": new_streak,
+                "agent_had_data": had_data,
                 "agent_large_query_families": large_families,
                 "agent_iterations": iteration,
-                "trail": [f"think_and_act #{iteration}: fail-fast after {new_streak} empty results"],
+                "trail": [f"think_and_act #{iteration}: fail-fast after {new_streak} empty results, synthesized"],
             }
 
-        result_str = _format_tool_result(result)
-
-        note = "(0 results — try a DIFFERENT class or filter) " if empty else ""
         return {
-            "agent_messages": [
-                AIMessage(content=raw_content),
-                HumanMessage(content=f"{note}Tool result for {tool_name}:\n{result_str}"),
-            ],
+            "agent_messages": step_messages,
             "agent_called": called,
             "agent_observations": observations,
             "agent_empty_streak": new_streak,
+            "agent_had_data": had_data,
             "agent_large_query_families": large_families,
             "agent_iterations": iteration,
             "trail": [f"think_and_act #{iteration}: called {tool_name}" + (" (empty)" if empty else "")],

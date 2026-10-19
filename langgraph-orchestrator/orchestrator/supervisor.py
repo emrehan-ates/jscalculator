@@ -16,7 +16,8 @@ from .chat_memory import normalize_chat_history
 from .mcp_runtime import get_runtime_manager
 from .nodes_agentic import MAX_AGENT_ITERATIONS
 from .nodes_create import (build_static_binding, resolve_epg_location, resolve_epg_encap,
-                           read_bindings_on_path, build_copy_bindings, resolve_vmm_domain_epgs)
+                           read_bindings_on_path, build_copy_bindings, resolve_vmm_domain_epgs,
+                           _path_tdn)
 from .nodes_port import (build_port_definition, resolve_switch_profile,
                          resolve_port_ref, read_port_template)
 
@@ -383,29 +384,79 @@ async def _build_copy_port(params, user_input, team="", convention=None):
     prep["trail"] = trail + prep.get("trail", [])
     return prep
 
+def _copy_destinations(params):
+    """Destination port references for copy_epg_bindings: the "destinations"
+    list, plus a single "destination" (older intent shape). Each entry is a
+    dict; a bare string is treated as a serial / interface-profile name."""
+    raw = params.get("destinations")
+    if isinstance(raw, (dict, str)):
+        raw = [raw]
+    refs = list(raw or [])
+    single = params.get("destination")
+    if isinstance(single, list):
+        refs.extend(single)
+    elif single:
+        refs.append(single)
+    out = []
+    for r in refs:
+        if isinstance(r, str) and r.strip():
+            r = {"serial": r.strip()}
+        if isinstance(r, dict) and r and r not in out:
+            out.append(r)
+    return out
+
+
+def _ref_label(ref):
+    if ref.get("serial") or ref.get("name"):
+        return str(ref.get("serial") or ref.get("name"))
+    if ref.get("node2"):
+        return f"leaf{ref.get('node')}-{ref.get('node2')} {ref.get('policy_group') or ref.get('vpc') or ''}".strip()
+    return f"leaf{ref.get('node', '?')} {ref.get('port', '')}".strip()
+
+
 async def _build_copy_bindings(params, user_input, convention=None):
+    """Copy ALL EPG static bindings of one source port onto one or MANY
+    destination ports in a single approval-gated POST.
+
+    A destination that cannot be resolved (typo, ambiguous serial, same as the
+    source) is skipped and listed in the plan instead of failing the whole
+    copy; the copy fails only when NO destination resolves.
+    """
     def cerr(msg, t=None):
         return {"flow": "create", "intent": "copy_epg_bindings", "user_input": user_input,
                 "errors": [f"Copy bindings: {msg}"], "trail": t or ["_build_copy_bindings: error"]}
 
     source = params.get("source")
-    destination = params.get("destination")
+    if isinstance(source, str) and source.strip():
+        source = {"serial": source.strip()}
+    destinations = _copy_destinations(params)
     if not isinstance(source, dict) or not source:
         return cerr("missing source port reference")
-    if not isinstance(destination, dict) or not destination:
+    if not destinations:
         return cerr("missing destination port reference")
 
     trail = []
     # -- Resolve switch-name fragments in source/destination "node" fields --
-    for ref_dict in (source, destination):
+    # The source must resolve; a destination that fails is skipped below.
+    skipped = []
+    dest_refs = []
+    for idx, ref_dict in enumerate([source] + destinations):
+        failed = None
         for key in ("node", "node2"):
             if key in ref_dict and not re.match(r"^\d{1,4}$", str(ref_dict[key]).strip()):
                 nres = await resolve_node_name(ref_dict[key], convention)
                 if nres.get("error"):
-                    return cerr(f"{key} name resolution failed for '{ref_dict[key]}': {nres['error']}",
-                                trail + ["resolve_node_name: error"])
+                    failed = f"{key} name resolution failed for '{ref_dict[key]}': {nres['error']}"
+                    break
                 trail.append(f"resolve_node_name: {ref_dict[key]} -> {nres['node_id']} ({nres.get('node_name', '')})")
                 ref_dict[key] = nres["node_id"]
+        if idx == 0:
+            if failed:
+                return cerr(f"source {failed}", trail + ["resolve_node_name: error"])
+        elif failed:
+            skipped.append({"destination": _ref_label(ref_dict), "reason": failed})
+        else:
+            dest_refs.append(ref_dict)
 
     src = await resolve_port_ref(source)
     if src.get("error"):
@@ -430,16 +481,42 @@ async def _build_copy_bindings(params, user_input, convention=None):
         return cerr("source has no EPG bindings", trail + ["read source: empty"])
     trail.append(f"read source: {len(specs)} unique binding(s)")
 
-    dst = await resolve_port_ref(destination)
-    if dst.get("error"):
-        return cerr(f"destination: {dst['error']}", trail + ["resolve dest: error"])
-    dst_tdns = dst.get("tdns") or ([dst["tdn"]] if dst.get("tdn") else [])
-    trail.append(f"resolve dest: {dst['label']} -> {len(dst_tdns)} path(s)")
+    # Resolve every destination; each may expand to several paths.
+    src_set = set(src_tdns)
+    dest_groups = []
+    dst_tdns = []
+    for ref in dest_refs:
+        label = _ref_label(ref)
+        explicit = _path_tdn(ref) if (ref.get("tdn") or ref.get("node2")) else None
+        if explicit:
+            tdns = [explicit]
+        else:
+            dst = await resolve_port_ref(ref)
+            if dst.get("error"):
+                skipped.append({"destination": label, "reason": dst["error"]})
+                trail.append(f"resolve dest: {label} -> skipped ({dst['error']})")
+                continue
+            tdns = dst.get("tdns") or ([dst["tdn"]] if dst.get("tdn") else [])
+            label = dst.get("label", label)
+        if src_set & set(tdns):
+            skipped.append({"destination": label, "reason": "same port as the source"})
+            trail.append(f"resolve dest: {label} -> skipped (overlaps source)")
+            continue
+        new = [t for t in tdns if t not in dst_tdns]
+        if not new:
+            skipped.append({"destination": label, "reason": "duplicate of another destination"})
+            continue
+        dst_tdns.extend(new)
+        dest_groups.append({"destination": label, "paths": new})
+        trail.append(f"resolve dest: {label} -> {len(new)} path(s)")
 
-    if set(src_tdns) & set(dst_tdns):
-        return cerr("source and destination overlap (same port)", trail + ["same tdn"])
+    if not dst_tdns:
+        reasons = "; ".join(f"{x['destination']}: {x['reason']}" for x in skipped)
+        return cerr(f"no destination could be resolved ({reasons})", trail + ["resolve dest: none"])
 
-    prep = build_copy_bindings(specs, dst_tdns, user_input)
+    prep = build_copy_bindings(specs, dst_tdns, user_input,
+                               source_label=src.get("label", ""),
+                               dest_groups=dest_groups, skipped=skipped)
     prep["trail"] = trail + prep.get("trail", [])
     return prep
 

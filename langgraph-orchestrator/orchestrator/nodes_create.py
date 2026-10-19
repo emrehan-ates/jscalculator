@@ -523,7 +523,8 @@ async def read_bindings_on_path(tdn: str) -> dict:
     return {"specs": specs, "error": None}
 
 
-def build_copy_bindings(specs, dest_tdns, user_input):
+def build_copy_bindings(specs, dest_tdns, user_input, source_label="",
+                        dest_groups=None, skipped=None):
     """Re-create each source EPG static binding on every dest path (additive merge).
 
     specs: list of {"tenant","ap","epg","encap","mode"} read from the source path.
@@ -531,6 +532,10 @@ def build_copy_bindings(specs, dest_tdns, user_input):
       access ports). Each source binding is created on EVERY destination path.
     Each binding keeps its OWN encap and mode (copy preserves per-binding mode).
     status 'created' merges into the destination; existing bindings are untouched.
+
+    The plan payload is a compact summary (bindings listed once, destinations
+    listed once) so a copy to many ports stays readable in the approval view;
+    dest_groups / skipped come from the caller's per-destination resolution.
 
     Builds the same polUni tree shape as build_static_binding:
       polUni -> fvTenant -> fvAp -> fvAEPg -> fvRsPathAtt
@@ -590,11 +595,21 @@ def build_copy_bindings(specs, dest_tdns, user_input):
     post_path = "/api/node/mo/uni.json"
 
     n = len(display)
+    payload = {
+        "source": source_label,
+        "bindings": [f"{s['tenant']}/{s['ap']}/{s['epg']} "
+                     f"{s['encap'] if str(s['encap']).startswith('vlan-') else 'vlan-' + str(s['encap'])} "
+                     f"{s.get('mode') or 'regular'}" for s in specs],
+        "destinations": dest_groups or [{"destination": t, "paths": [t]} for t in dest_tdns],
+        "total_new_bindings": n,
+    }
+    if skipped:
+        payload["skipped_destinations"] = skipped
     return {
         "flow": "create", "intent": "copy_epg_bindings", "user_input": user_input,
-        "target_class": f"fvRsPathAtt (copy {n} binding(s))",
+        "target_class": f"fvRsPathAtt (copy {len(specs)} binding(s) to {len(dest_tdns)} path(s), {n} total)",
         "dn": "uni",
-        "payload": display,
+        "payload": payload,
         "post_path": post_path, "post_body": post_body,
         "errors": [],
         "trail": [f"build_copy_bindings: {n} binding(s) -> {len(dest_tdns)} dest path(s)"],
