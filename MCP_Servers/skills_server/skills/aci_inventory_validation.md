@@ -49,8 +49,8 @@ State the scope and the count together, for example:
 ## Relationship to other skills
 
 - Use aci_object_map to choose the right class.
-- Use aci_search_techniques when you need to locate an object by name before counting its children.
-- Use aci_fault_investigation, aci_interface_troubleshooting, aci_endpoint_troubleshooting, aci_epg_deployment, and aci_access_policy_chain for root-cause analysis after the count or inventory check.
+- Use aci_query_syntax (search strategy) and aci_naming_conventions when you need to locate an object by name before counting its children.
+- Use aci_fault_investigation, aci_interface_troubleshooting, aci_endpoint_troubleshooting, aci_epg_bindings, and aci_access_policy_chain for root-cause analysis after the count or inventory check.
 
 ## ACI policy note for this environment
 

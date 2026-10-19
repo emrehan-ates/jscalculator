@@ -1,37 +1,47 @@
 # ACI Troubleshooting Overview — choose the right skill
 
-Use this skill when the user asks a broad troubleshooting question, an inventory/count question, or when you need to route to the correct ACI troubleshooting playbook.
+Router for broad or unclear requests: maps the question (summary, relations, bindings, location, faults, ports, counts) to the one skill that answers it.
 
 ## Routing rules
 
-- To turn a MAC, serial, or device/interface name into a leaf node + physical port(s) before any other check, use [aci_resolve_identifier.md](aci_resolve_identifier.md). Most port/fault/binding tasks start here.
-- For "how many", "how much", "list all", or count-style questions, use [aci_inventory_validation.md](aci_inventory_validation.md).
-- For questions about ONE named object's properties or what is attached to it (e.g. "properties of X EPG", "static bindings of X EPG", "ports in X interface profile"), use [aci_object_inspection.md](aci_object_inspection.md).
-- For a single endpoint or MAC lookup, use [aci_endpoint_troubleshooting.md](aci_endpoint_troubleshooting.md).
-- For locating a SERVER or HOST by NAME/hostname (not a MAC), use [aci_server_locator.md](aci_server_locator.md).
-- If the user names a SWITCH by hostname (e.g. "DR1-C6-8") instead of a numeric node ID, first resolve it with [aci_switch_name_resolution.md](aci_switch_name_resolution.md), then continue with the relevant skill.
-- For reachability between two MACs, use [aci_connectivity_between_endpoints.md](aci_connectivity_between_endpoints.md).
-- For a port up/down, speed, or CRC/FCS problem, use [aci_interface_troubleshooting.md](aci_interface_troubleshooting.md).
-- For a vPC/port-channel peer state, member consistency, or bundle-leg problem, use [aci_vpc_health.md](aci_vpc_health.md).
-- For an EPG not working on a port, use [aci_epg_deployment.md](aci_epg_deployment.md).
-- For a VLAN or port that is not deploying, use [aci_access_policy_chain.md](aci_access_policy_chain.md).
-- For an L3Out / external routing problem (BGP/OSPF adjacency, learned routes, external reachability), use [aci_l3out_troubleshooting.md](aci_l3out_troubleshooting.md).
-- For APIC controller cluster health, quorum, or "is the APIC itself the problem", use [aci_apic_cluster_health.md](aci_apic_cluster_health.md).
-- For firmware versions, version consistency, or in-progress upgrades/maintenance, use [aci_firmware_maintenance.md](aci_firmware_maintenance.md).
-- For faults, alarms, or "what is wrong", use [aci_fault_investigation.md](aci_fault_investigation.md). This also covers faults scoped to a specific port, device name/serial, endpoint MAC, or LLDP neighbor, and fault history / records over a time window (e.g. last 48 hours).
-- For "what changed", "who changed", audit questions, or correlating a problem with a recent configuration change, use [aci_change_audit.md](aci_change_audit.md).
-- For virtual machines, ESXi hosts, VMM domains, or "where is VM X", use [aci_vmm_visibility.md](aci_vmm_visibility.md).
-- When another team (server / VMware / database) asks "is the network the problem?" or a formal evidence report is needed for a ticket, use [aci_network_health_verdict.md](aci_network_health_verdict.md).
-- For filtering object trees with rsp-subtree, use [aci_subtree_analysis.md](aci_subtree_analysis.md).
-- For HOW to write an APIC query (filter operators, query-target vs rsp-subtree, paging, escaping), use [aci_query_syntax.md](aci_query_syntax.md).
+Names, relations and configuration (most common):
+
+- Server serial, MSY_/CSY_/SG_ name, switch hostname or EPG/VLAN name and you are unsure what it is → [aci_naming_conventions.md](aci_naming_conventions.md).
+- "What is X / X'i özetle / properties of X" for any tenant object (tenant, VRF, BD, AP, EPG) or access/fabric policy object (policy group, interface policy, AEP, phys/VMM domain, VLAN pool, interface/switch profile) → [aci_object_summary.md](aci_object_summary.md).
+- Relations between port ↔ interface profile ↔ policy group ↔ AEP ↔ domain (phys/VMM) ↔ VLAN pool, in either direction ("policy group of this port", "ports of this PG", "AEPs of this VMM domain"), or a VLAN not deploying → [aci_access_policy_chain.md](aci_access_policy_chain.md).
+- EPG static bindings, EPGs/VLANs on a port/server/policy group, EPGs of a VLAN, VMM dynamic deployment, "is EPG X on port Y" → [aci_epg_bindings.md](aci_epg_bindings.md).
+- Where is a server/host (MAC, serial, interface-profile name, hostname) → [aci_resolve_identifier.md](aci_resolve_identifier.md).
+- Switch named by hostname (e.g. "DR1-C6-8") → [aci_switch_name_resolution.md](aci_switch_name_resolution.md) first.
+- Which class / DN for an object type → [aci_object_map.md](aci_object_map.md); how to write the query → [aci_query_syntax.md](aci_query_syntax.md).
+- "How many / list all" → [aci_inventory_validation.md](aci_inventory_validation.md).
+
+Operations and troubleshooting:
+
+- Single endpoint / MAC learning → [aci_endpoint_troubleshooting.md](aci_endpoint_troubleshooting.md).
+- Reachability between two MACs → [aci_connectivity_between_endpoints.md](aci_connectivity_between_endpoints.md).
+- Port up/down, speed, CRC/FCS → [aci_interface_troubleshooting.md](aci_interface_troubleshooting.md).
+- vPC / port-channel state → [aci_vpc_health.md](aci_vpc_health.md).
+- L3Out / external routing → [aci_l3out_troubleshooting.md](aci_l3out_troubleshooting.md).
+- APIC cluster → [aci_apic_cluster_health.md](aci_apic_cluster_health.md); firmware/upgrades → [aci_firmware_maintenance.md](aci_firmware_maintenance.md).
+- Faults / "what is wrong" / fault history → [aci_fault_investigation.md](aci_fault_investigation.md).
+- "What changed / who changed" → [aci_change_audit.md](aci_change_audit.md).
+- VMs, ESXi hosts, vCenter connection → [aci_vmm_visibility.md](aci_vmm_visibility.md).
+- "Is the network the problem for server X" ticket verdict → [aci_network_health_verdict.md](aci_network_health_verdict.md).
+- Nothing fits → [generic_investigation.md](generic_investigation.md).
+
+## Answering rules (all skills)
+
+- The final answer interprets EVERY result gathered in the turn, including
+  partial chains. An empty query means "nothing matched that exact filter" —
+  say which one, and keep the findings from the other queries.
+- Structure: findings (with the values APIC returned) → what was empty or not
+  checked → optional next step.
+- Only when every query was empty or failed: say clearly that you could not
+  find it ("bulamadım / bilmiyorum"), list what you searched, and suggest how
+  to narrow it. Never fill gaps with guesses or naming assumptions.
 
 ## Fabric policy note
 
-Contracts are out of scope in this environment. The fabric uses vzAny permitAny and filtering happens on the firewall, so do not analyze contracts, subjects, or filters for troubleshooting or counting questions.
-
-## Good behavior
-
-- Pick the most specific skill first.
-- Do not mix count questions with troubleshooting guesses.
-- If the scope is unclear, resolve the object type first with aci_object_map and then apply the relevant skill.
-- Users may ask in Turkish or English. Route the same way regardless of language, and answer in the language the user used.
+Contracts are out of scope (vzAny permitAny; filtering on the firewall). Do not
+analyze contracts, subjects, or filters. Users ask in Turkish or English —
+route the same way and answer in the user's language.

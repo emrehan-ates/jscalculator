@@ -4,9 +4,9 @@ Use this skill when NO more specific skill fits the request. It is a general,
 read-only investigation procedure: scope the question, look at faults first,
 read the relevant object state, corroborate with counters/health, and report
 honestly. It never invents fabric facts or thresholds. If a more specific skill
-exists for the task (faults, interfaces, endpoints, EPG deployment, access
-policy, inventory, object inspection, connectivity, switch-name resolution,
-change audit, VMM), prefer that skill instead.
+exists for the task (faults, interfaces, endpoints, inventory, connectivity,
+switch-name resolution, change audit, VMM, object summary, access policy
+chain, EPG bindings), prefer that skill instead.
 
 ## Follow these steps in order
 
@@ -21,10 +21,11 @@ change audit, VMM), prefer that skill instead.
 - If the user gave a switch by hostname (letters + hyphens, not pure digits),
   resolve it to a numeric node ID first (see aci_switch_name_resolution) before
   using it in any query.
-- If the user asks for the **policy group of a port** (and you already know or
-  can resolve leaf+eth), stop using this generic path — read
-  aci_access_policy_chain **Path PG** instead. Never wcard policy-group classes
-  for an eth port or MAC string.
+- If the request is really a summary ("X nedir / özetle"), a port / policy
+  group / AEP / domain relation, or an EPG binding question, stop using this
+  generic path and read aci_object_summary, aci_access_policy_chain or
+  aci_epg_bindings instead. Never wcard policy-group classes for an eth port
+  or MAC string. Unknown names → aci_naming_conventions.
 
 ### 2. Faults first
 
@@ -90,7 +91,9 @@ say so plainly and say what you searched.
 If you see an iteration-budget warning, or several lookups in a row return
 nothing, STOP querying and synthesize immediately with what you have — an honest
 partial answer that states what remains unknown is better than looping to the
-cap.
+cap. The synthesis must use the results of ALL earlier queries in the turn, not
+only the last empty ones. Only when every query was empty or failed, say that
+you could not find it and list what you searched.
 
 **Large-result stop (same priority as empty fail-fast):** if a class query
 returns a `totalCount` much larger than the sample you received (or the tool

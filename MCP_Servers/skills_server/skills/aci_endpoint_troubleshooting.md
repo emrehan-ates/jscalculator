@@ -23,7 +23,7 @@ Key fields:
 - Found with a fabricPathDn -> learned. Report leaf/port, VLAN, BD, EPG.
 - Not found (0 results) -> the fabric is not learning this MAC. Likely causes, in order:
   1. Port down or host not sending traffic -> aci_interface_troubleshooting.
-  2. EPG not deployed on the port, or wrong VLAN/encap -> aci_epg_deployment.
+  2. EPG not deployed on the port, or wrong VLAN/encap -> aci_epg_bindings.
   3. Access policy chain incomplete so the VLAN never deployed -> aci_access_policy_chain.
   Tell the user it is not learned and which of these to check. Do not just say "not found".
 - Found in MORE THAN ONE fabricPathDn, or endpoint-move faults exist -> possible flapping. Flag it, check faults (aci_fault_investigation) and interface errors on both paths.

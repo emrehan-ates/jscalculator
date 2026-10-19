@@ -20,16 +20,17 @@ SKILLS_DIR = Path(__file__).parent / "skills"
 
 def _read_first_meaningful_line(content: str, max_len: int = 200) -> str:
     """Find the first non-empty, non-header line as a summary."""
-    in_comment=False
+    in_comment = False
     for line in content.split("\n"):
         line = line.strip()
         if in_comment:
-            if "--->" in lime:
-                in_comment=False
+            if "-->" in line:
+                in_comment = False
             continue
         if line.startswith("<!--"):
             if "-->" not in line:
-                in_comment=True
+                in_comment = True
+            continue
         if line and not line.startswith("#") and not line.startswith("---"):
             return line[:max_len]
     return ""

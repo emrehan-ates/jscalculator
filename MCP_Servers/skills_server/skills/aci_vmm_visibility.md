@@ -9,7 +9,7 @@ Use this skill for questions about virtual machines, ESXi hosts, vCenter/VCF int
 - **compHv** — a hypervisor (ESXi host). name = the host name as vCenter knows it.
 - **compCtrlr** — the vCenter controller itself. operSt = online means the APIC↔vCenter connection is healthy.
 - **vmmDomP** — the VMM domain (uni/vmmp-VMware/dom-NAME).
-- **fvIfConn** — where an EPG's VLAN is dynamically deployed via VMM (see aci_epg_deployment CHECK 3).
+- **fvIfConn** — where an EPG's VLAN is dynamically deployed via VMM (see aci_epg_bindings section D).
 
 ## "Where is VM X" (the most common question)
 
@@ -25,16 +25,19 @@ Report: VM name, vNIC MAC(s), EPG, VLAN, and the physical leaf/port (usually a v
 
 ## Other question patterns
 
-- "Which EPGs are in VMM domain D": query fvRsDomAtt and keep results whose tDn contains dom-D:
-  /api/node/class/fvRsDomAtt.json?query-target-filter=wcard(fvRsDomAtt.tDn,"dom-D")
-  Parse each result dn for tenant/AP/EPG.
+- "Which EPGs are in VMM domain D": exact reverse lookup on the domain DN:
+  /api/node/class/fvRsDomAtt.json?query-target-filter=eq(fvRsDomAtt.tDn,"uni/vmmp-VMware/dom-D")
+  Parse each result dn for tenant/AP/EPG. (wcard "dom-D" would also match dom-D2, dom-DX…)
+- "Which AEPs / policy groups / ports carry VMM domain D": aci_access_policy_chain Path DOWN
+  (infraRsDomP reverse → AEPs → infraRsAttEntP reverse → PGs → ports).
+- "Summarize VMM domain D" (vCenter, VLAN pool, AEPs, EPG count): aci_object_summary (Domain section).
 - "Which ESXi hosts does APIC see": /api/node/class/compHv.json (filter by name with wcard if needed). A host missing here but present in vCenter suggests a VMM inventory sync problem.
 - "Is the vCenter connection healthy": /api/node/class/compCtrlr.json — check operSt (online) and report the controller name/address. If offline, VMM-deployed VLANs may be stale; check faults on the vmmDomP dn (aci_fault_investigation).
-- "Which physical port does host H uplink through": the host advertises itself via LLDP/CDP — use aci_server_locator (sysName = the ESXi hostname). Cross-check with the vPC bundle naming convention (CSY_/MSY_ + serial).
+- "Which physical port does host H uplink through": the host advertises itself via LLDP/CDP — use aci_resolve_identifier Path C (lldpAdjEp.sysName = the ESXi hostname). Cross-check with the vPC bundle naming convention (CSY_/MSY_ + serial).
 
 ## Migration validation (vCenter -> VCF)
 
-To verify an EPG survived a host migration, compare its dynamic deployments before/after: query fvIfConn filtered by the EPG dn fragment (aci_epg_deployment CHECK 3 shows the DN shape). A VLAN that was deployed on the old host's path and is absent on the new host's path — while VMs from that EPG run on the new host — indicates the new host's uplink port/AEP is missing the VMM domain (walk aci_access_policy_chain on the new port).
+To verify an EPG survived a host migration, compare its dynamic deployments before/after: query fvIfConn filtered by the EPG dn fragment (aci_epg_bindings section D shows the DN shape). A VLAN that was deployed on the old host's path and is absent on the new host's path — while VMs from that EPG run on the new host — indicates the new host's uplink port/AEP is missing the VMM domain (walk aci_access_policy_chain on the new port).
 
 ## Good behavior
 

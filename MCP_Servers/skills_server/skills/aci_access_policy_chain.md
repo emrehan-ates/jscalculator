@@ -1,155 +1,151 @@
-# ACI Access Policy Chain — policy group of a port, and why a VLAN/port is (not) deployed
+# ACI Access Policy Chain — port ↔ interface profile ↔ policy group ↔ AEP ↔ domain (phys/VMM) ↔ VLAN pool
 
-Use for "policy group of this port/MAC", policy grubu, AEP/access-policy of a known leaf+eth, or broken VLAN deploy on an access port — Path PG reverse-walks node→switch profile→interface profile→infraRsAccBaseGrp (never filter PG classes by eth/MAC).
+Use for policy group of a port (policy grubu), ports of a policy group, AEP of a PG, PGs/domains of an AEP, AEPs/pools of a phys/VMM domain, or why a VLAN is not deployed on a port.
 
-Use this skill when:
-- the user already knows a leaf/port (or just found it via MAC/hostname) and asks
-  **which policy group** that port uses (`policy group`, `policy grubu`,
-  `hangi interface policy`, AEP of this port, access-policy of this port), OR
-- a port "does not work", a VLAN is "not passing", or an endpoint is not learned
-  even though cabling looks fine (broken link in the access policy chain).
+This skill is the single source of truth for walking the fabric access-policy
+relations in BOTH directions. For the tenant side (EPG static bindings, EPGs on
+a port/server, VMM dynamic deployment) use **aci_epg_bindings**. For a full
+"summarize X" answer use **aci_object_summary**. Site naming →
+**aci_naming_conventions**.
 
-This skill is the single source of truth for walking the access-policy chain in
-BOTH directions. Do NOT invent filters on `infraAccPortGrp`/`infraAccBndlGrp`
-for a physical eth port name — policy groups are not keyed by `eth1/X`.
-
-## The chain (each link must exist for a VLAN to deploy on a port)
+## The relation graph
 
 ```
-Switch profile (infraNodeP)
-  -> binds interface profile (infraRsAccPortP)
-  -> holds node IDs (infraNodeBlk)
-Interface profile (infraAccPortP)
-  -> port selector (infraHPortS)
-  -> port block (infraPortBlk = eth ports)
-  -> relation to policy group (infraRsAccBaseGrp.tDn)
-Policy group (infraAccPortGrp access | infraAccBndlGrp PC/vPC)
-  -> AEP (infraRsAttEntP)
-AEP (infraAttEntityP) -> domain (infraRsDomP)
-Domain -> VLAN pool (infraRsVlanNs)
-VLAN pool -> encap blocks (fvnsEncapBlk) must CONTAIN the VLAN
+fabricNode (leaf N)
+   ▲ infraNodeBlk (from_/to_)        under uni/infra/nprof-<SWPROF>/leaves-.../nodeblk-...
+Switch profile  infraNodeP           uni/infra/nprof-<SWPROF>
+   │ infraRsAccPortP.tDn
+   ▼
+Interface profile  infraAccPortP     uni/infra/accportprof-<IFPROF>
+   │ infraHPortS (port selector)
+   │   ├─ infraPortBlk  fromCard/fromPort … toCard/toPort  (= eth ports)
+   │   └─ infraRsAccBaseGrp.tDn  ──►  policy group
+   ▼
+Policy group  infraAccPortGrp  uni/infra/funcprof/accportgrp-<PG>   (access)
+              infraAccBndlGrp  uni/infra/funcprof/accbundle-<PG>    (lagT=link PC, lagT=node vPC)
+   │ infraRsAttEntP.tDn
+   ▼
+AEP  infraAttEntityP                 uni/infra/attentp-<AEP>
+   │ infraRsDomP.tDn                 (also gen-default/infraRsFuncToEpg = EPGs deployed on the whole AEP)
+   ▼
+Domain  physDomP uni/phys-<D> | vmmDomP uni/vmmp-VMware/dom-<D> | l3extDomP uni/l3dom-<D>
+   │ infraRsVlanNs.tDn
+   ▼
+VLAN pool  fvnsVlanInstP             uni/infra/vlanns-[<POOL>]-static|dynamic
+   └─ fvnsEncapBlk  from / to        (e.g. vlan-100 … vlan-199)
+
+Tenant side: EPG ─fvRsDomAtt─► Domain   and   EPG ─fvRsPathAtt─► fabric path   (aci_epg_bindings)
 ```
 
-If any link is missing, or the VLAN is outside the pool range, the VLAN will not
-deploy even though everything "looks" configured.
+Every arrow is a relation object you can query **forward** (read the parent
+with `rsp-subtree`) or **reverse** (query the relation class with
+`eq(<RelClass>.tDn,"<target dn>")` and take the parent part of each result `dn`).
 
-## Path PG — known leaf + physical port → policy group (PRIMARY for "policy group of this port")
+## Reverse-lookup cheat sheet (one call each)
 
-Use this when you already have `node-N` + `ethX/Y` (from conversation history,
-`fvCEp.fabricPathDn`, LLDP/CDP, or aci_resolve_identifier / aci_server_locator).
+| Question | Query | Answer is in |
+|---|---|---|
+| Which switch profiles contain node N | `infraNodeBlk` `and(le(infraNodeBlk.from_,"N"),ge(infraNodeBlk.to_,"N"))` | `nprof-<SWPROF>` segment of each `dn` |
+| Which switch profiles bind interface profile X | `infraRsAccPortP` `eq(infraRsAccPortP.tDn,"uni/infra/accportprof-X")` | `nprof-...` in `dn` |
+| Which selectors/interface profiles use PG X | `infraRsAccBaseGrp` `eq(infraRsAccBaseGrp.tDn,"<PG dn>")` | `accportprof-<IFPROF>/hports-<SEL>-typ-range` in `dn` |
+| Which PGs use AEP X | `infraRsAttEntP` `eq(infraRsAttEntP.tDn,"uni/infra/attentp-X")` | `accportgrp-...` / `accbundle-...` in `dn` |
+| Which AEPs carry domain D | `infraRsDomP` `eq(infraRsDomP.tDn,"<domain dn>")` | `attentp-<AEP>` in `dn` |
+| Which domains use VLAN pool P | `infraRsVlanNs` `eq(infraRsVlanNs.tDn,"<pool dn>")` | domain DN prefix of `dn` |
+| Which EPGs use domain D | `fvRsDomAtt` `eq(fvRsDomAtt.tDn,"<domain dn>")` | `uni/tn-T/ap-AP/epg-E` prefix of `dn` |
+| Which pool contains VLAN V | `/api/node/class/fvnsEncapBlk.json` (small class) and compare `from`/`to` NUMERICALLY yourself — `le`/`ge` on `vlan-N` strings compare as text and give wrong answers | `vlanns-[...]` in `dn` |
 
-**STOP conditions:** once you have `infraRsAccBaseGrp.tDn` (and optionally the
-policy-group name parsed from it), answer. Do NOT keep re-querying the same
-class. Do NOT probe random MO classes looking for the eth port string.
+Combine several targets in ONE call with `or(eq(...),eq(...))` instead of one
+call per target.
 
-### PG0. Fast path when `fabricPathDn` already names a bundle
+## Path PG — known leaf + port → policy group (most asked)
 
-If the known path is:
+Input: `node-N` + `ethX/Y` (from the user, conversation history,
+`fvCEp.fabricPathDn`, LLDP, or **aci_resolve_identifier**).
 
-- `.../protpaths-<N1>-<N2>/pathep-[<BUNDLE>]` or
-- `.../paths-<N>/pathep-[<BUNDLE>]` where `<BUNDLE>` is **not** `eth...`
+**PG0 – bundle shortcut.** If the known path is `.../protpaths-N1-N2/pathep-[B]`
+or `.../paths-N/pathep-[B]` and `B` is not `eth...`, then `B` IS the PC/vPC
+policy-group name:
+`/api/node/mo/uni/infra/funcprof/accbundle-B.json?rsp-subtree=full`. Done.
 
-then `<BUNDLE>` **is** the PC/vPC policy-group name. Resolve it directly:
+**PG1 – switch profiles of the node:**
+`/api/node/class/infraNodeBlk.json?query-target-filter=and(le(infraNodeBlk.from_,"N"),ge(infraNodeBlk.to_,"N"))`
+→ unique `uni/infra/nprof-<SWPROF>`. 0 results → node is in no switch profile; report it.
 
-```
-/api/node/class/infraAccBndlGrp.json?query-target-filter=eq(infraAccBndlGrp.name,"<BUNDLE>")
-```
+**PG2 – interface profiles of those switch profiles:**
+`/api/node/mo/uni/infra/nprof-<SWPROF>.json?rsp-subtree=children&rsp-subtree-class=infraRsAccPortP`
+→ each `infraRsAccPortP.tDn`.
 
-Optionally read that MO with `rsp-subtree=full` for AEP (`infraRsAttEntP`).
-You are done — skip PG1–PG4.
+**PG3 – find the selector that covers the port:** for each interface profile
+`/api/node/mo/<ifprof dn>.json?rsp-subtree=full`. A `infraPortBlk` covers
+`ethC/P` when `fromCard ≤ C ≤ toCard` and `fromPort ≤ P ≤ toPort`. The
+`infraRsAccBaseGrp.tDn` on the SAME `infraHPortS` is the policy group.
+Several matching selectors → report all.
 
-If the path is `.../pathep-[eth1/X]` (access), continue with PG1.
+**PG4 – enrich only if asked** (AEP, domains, interface policies):
+read the PG with `rsp-subtree=full`, then continue forward below.
 
-### PG1. Find switch profile(s) that include this node
+Stop as soon as you have the PG. Never wcard `infraAccPortGrp` /
+`infraAccBndlGrp` with `eth1/X` or a MAC — those classes have no such attribute.
 
-```
-/api/node/class/infraNodeBlk.json?query-target-filter=and(le(infraNodeBlk.from_,"<N>"),ge(infraNodeBlk.to_,"<N>"))
-```
+## Path PORTS — policy group → interface profiles, ports, leaves
 
-Each hit's DN parent is `uni/infra/nprof-<SWPROF>`. Collect unique switch
-profile names. If 0 results, the node is not in any switch profile — report that.
+1. `infraRsAccBaseGrp` with `eq(infraRsAccBaseGrp.tDn,"<PG dn>")` → every
+   selector using the PG (`.../accportprof-<IFPROF>/hports-<SEL>-typ-range/rsaccBaseGrp`).
+2. For each interface profile: `/api/node/mo/uni/infra/accportprof-<IFPROF>.json?rsp-subtree=full`
+   → the `infraPortBlk` ranges of THOSE selectors only (never mix selectors).
+3. `infraRsAccPortP` with `eq(infraRsAccPortP.tDn,"uni/infra/accportprof-<IFPROF>")`
+   → switch profiles → read each with
+   `rsp-subtree=full&rsp-subtree-class=infraNodeBlk` → node IDs.
+4. Result: (node × port) list. For a vPC PG the members are spread over the two
+   leaves; for a PC all members are usually on one leaf.
 
-### PG2. List interface profiles bound to each switch profile
+## Path UP — policy group → AEP → domains → VLAN pools
 
-```
-/api/node/mo/uni/infra/nprof-<SWPROF>.json?rsp-subtree=children&rsp-subtree-class=infraRsAccPortP
-```
+1. `/api/node/mo/<PG dn>.json?rsp-subtree=full` → `infraRsAttEntP.tDn` (AEP).
+   No `infraRsAttEntP` = broken chain; report it.
+2. `/api/node/mo/uni/infra/attentp-<AEP>.json?rsp-subtree=full` →
+   `infraRsDomP.tDn` (domains) and `infraRsFuncToEpg` (EPGs deployed on the whole
+   AEP: `tDn`, `encap`, `mode`).
+3. For each domain `/api/node/mo/<domain dn>.json?rsp-subtree=full` →
+   `infraRsVlanNs.tDn` (pool); for a VMM domain also `vmmCtrlrP` (vCenter).
+4. `/api/node/mo/<pool dn>.json?rsp-subtree=full` → `fvnsEncapBlk` ranges and
+   `allocMode`.
 
-Each `infraRsAccPortP.tDn` is an interface profile DN
-(`uni/infra/accportprof-...`).
+## Path DOWN — domain / AEP → who uses it
 
-### PG3. Match the physical port inside each interface profile
+- VMM or phys domain → AEPs: `infraRsDomP` reverse (cheat sheet), then AEPs →
+  PGs: `infraRsAttEntP` reverse, then PGs → ports: Path PORTS.
+- Domain → EPGs: `fvRsDomAtt` reverse.
+- Large fan-out (an AEP used by hundreds of PGs): report `totalCount` and a
+  sample; do not walk every PG to its ports unless the user asked.
 
-For each candidate interface profile:
+## Why is VLAN V not working on port P (consistency check)
 
-```
-/api/node/mo/<interface_profile_dn>.json?rsp-subtree=full
-```
+All of these must hold:
 
-Walk children:
+1. Port is covered by a selector → PG (Path PG).
+2. PG has an AEP; AEP has ≥1 domain.
+3. The EPG's `fvRsDomAtt` contains one of those SAME domains.
+4. That domain's VLAN pool contains V.
+5. The EPG has a binding for the port/bundle with encap `vlan-V`
+   (**aci_epg_bindings**) — or the AEP has `infraRsFuncToEpg` for it, or a VMM
+   dynamic `fvIfConn` exists.
 
-1. Under each `infraHPortS`, read every `infraPortBlk`.
-2. A block covers the target port when card/port fall inside
-   `fromCard`/`fromPort` … `toCard`/`toPort` (single-port blocks have from=to).
-3. On the **same** `infraHPortS` that matched the port, read
-   `infraRsAccBaseGrp.tDn` — that is the policy group DN.
+Report the first link that breaks. Most common breaks: PG without AEP, AEP
+missing the EPG's domain, VLAN outside pool range, binding on the eth path
+while the port is actually a vPC member (binding must be on the bundle path).
 
-Parse the PG DN:
+## Answering
 
-- `uni/infra/funcprof/accportgrp-<NAME>` → access policy group `infraAccPortGrp`
-- `uni/infra/funcprof/accbundle-<NAME>` → PC/vPC policy group `infraAccBndlGrp`
-
-If several selectors match (unusual), report all distinct policy groups.
-
-### PG4. Optional enrich (only if user also asked AEP / domain / VLAN pool)
-
-```
-/api/node/mo/<policy_group_dn>.json?rsp-subtree=full
-```
-
-Then continue the forward walk below from step 3.
-
-### Anti-patterns (these cause the "10 identical empty queries" failure)
-
-- Do NOT query `infraAccPortGrp` / `infraAccBndlGrp` with `wcard` on `eth1/47`
-  or the MAC — those classes have no eth/MAC attributes.
-- Do NOT re-run the same `fvCEp` / `fabricNode` / empty class query hoping the
-  policy group appears.
-- Do NOT treat the interface-profile name and the policy-group name as the same
-  object until `infraRsAccBaseGrp.tDn` proves it (they often match by naming
-  convention, but APIC truth is the relation).
-- If PG1–PG3 yield no match after all bound interface profiles are checked, say
-  "no access policy covers leaf N ethX/Y" once and stop.
-
-## How to walk it forward (from a known interface profile or policy group)
-
-1. If you only have the interface profile name/DN, read its subtree
-   (`rsp-subtree=full`): confirm the port block; read
-   `infraRsAccBaseGrp.tDn` = the policy group. (This is the short path when
-   the user named `MSY_<SERIAL>` / interface profile directly.)
-2. Find the switch profile for the interface profile by reverse lookup when you
-   need nodes:
-   `/api/node/class/infraRsAccPortP.json?query-target-filter=eq(infraRsAccPortP.tDn,"<interface profile dn>")`
-   Parent `uni/infra/nprof-<SWPROF>` is the switch profile; `infraNodeBlk` =
-   node IDs.
-3. Read the policy group subtree: `infraRsAttEntP.tDn` = the AEP.
-4. Read the AEP subtree: `infraRsDomP` = the domain(s).
-5. Read the domain: `infraRsVlanNs` = the VLAN pool.
-6. Read the VLAN pool subtree (`fvnsEncapBlk` from_/to_): confirm the VLAN is
-   inside a block.
-
-Report which link is missing or breaks. Most common breaks: policy group has no
-AEP, AEP has no domain, or the VLAN is outside the pool range.
-
-## Cross-check the tenant side
-
-Even with a complete chain, the EPG must associate the SAME domain (`fvRsDomAtt`)
-and be statically bound to the port with the right encap. See aci_epg_deployment.
+- Build the answer from EVERY result you collected, including partial chains:
+  e.g. "port → PG = X, PG → AEP = Y; AEP domains query returned nothing".
+- Empty result = "not found with this exact filter", not proof the object
+  does not exist — say which filter was empty.
+- Only if every query returned nothing/errors: say plainly that you could not
+  find it and list what you searched. Never fill gaps with naming guesses.
 
 ## Hand-off
 
-- Need leaf+port first from MAC/serial/hostname → aci_resolve_identifier or
-  aci_server_locator, **then return here** for Path PG.
-- Only asked "is the port up / CRC" → aci_interface_troubleshooting (not this
-  skill).
-
+- Need leaf+port from MAC / serial / hostname → **aci_resolve_identifier**, then return here.
+- EPGs on the port / static bindings / VMM deployment → **aci_epg_bindings**.
+- Port up/down, CRC → **aci_interface_troubleshooting**.

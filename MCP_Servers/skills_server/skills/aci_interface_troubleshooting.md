@@ -44,4 +44,4 @@ In rmon children of the interface:
 
 - Always report BOTH the operational state and the counter values, then give the interpretation from the rules above.
 - If the port is down, operStQual is the headline — counters are secondary.
-- Tie a faulty port back to the endpoint or EPG the user cares about (aci_endpoint_troubleshooting, aci_epg_deployment).
+- Tie a faulty port back to the endpoint or EPG the user cares about (aci_endpoint_troubleshooting, aci_epg_bindings).

@@ -1,174 +1,95 @@
-# ACI Resolve Identifier — turn a MAC, serial, or device/interface name into leaf node + physical port(s)
+# ACI Resolve Identifier — find where a server/host is connected: MAC, serial, interface-profile name or hostname → leaf + port(s)
 
-Use this skill whenever you have an identifier (a MAC address, a device serial, an
-interface-profile name, or a host/device name) and you need the concrete
-leaf **node ID + physical port(s)** before you can query faults, interface
-state, bindings, or counters. Almost every troubleshooting task starts here.
-This is the single source of truth for the resolution chains — other skills
-reference it instead of repeating the steps.
+Use for "where is server X / hangi porta bağlı", a MAC, serial (CX…/CZ…), MSY_/CSY_ profile name or ESXi hostname → leaf node + port(s), policy group and data/management attachments.
 
-Pick the ONE path that matches your input type. Do not mix paths.
+Almost every port/fault/binding task starts here. This is the single source of
+truth for resolution chains; other skills reference it. Naming rules →
+**aci_naming_conventions**. Switch hostnames (`DR1-C6-8`) →
+**aci_switch_name_resolution** (different chain).
 
-- Input is a **MAC address** (`XX:XX:XX:XX:XX:XX`, `XXXX.XXXX.XXXX`, or 12 hex
-  nibbles) → **Path A**.
-- Input is a **serial / interface-profile name / device asset tag** (e.g.
-  `CX124553KT`, `MSY_CX124553KT`) → **Path B**.
-- Input is a **switch hostname** (letters + hyphens, e.g. `DR1-C6-8`) → this is a
-  different chain; use aci_switch_name_resolution.
-- Input is a **server/ESXi/VM hostname** → use aci_server_locator. Its hostname
-  path resolves deterministically via access-policy objects
-  (`infraAccPortP`/`infraRsAccPortP`/`infraNodeBlk`) and returns the attachment
-  set (data + management).
+Pick ONE path by input type and stay on it:
 
----
+- **MAC** (`XX:XX:XX:XX:XX:XX`, `XXXX.XXXX.XXXX`, 12 hex nibbles) → **Path A**.
+- **Serial / asset tag / interface-profile name** (`CX124553KT`, `MSY_CX124553KT`) → **Path B**.
+- **Free hostname** (`dbprod-node3`, `esxi-05.domain.local`) → **Path C**.
 
-## Path A — MAC address → node + port
+Never search `fvCEp` with a non-MAC; never run Path A for a serial.
 
-### A1. Find the learned endpoint
+## Path A — MAC → node + port
 
-```
-/api/node/class/fvCEp.json?query-target-filter=eq(fvCEp.mac,"AA:BB:CC:DD:EE:FF")
-```
+1. `/api/node/class/fvCEp.json?query-target-filter=eq(fvCEp.mac,"AA:BB:CC:DD:EE:FF")`
+   (MAC upper-case, colon format). Keep `fabricPathDn`, `encap`, `bdDn`, `dn`
+   (tenant/AP/EPG from `uni/tn-T/ap-AP/epg-E/...`).
+2. Parse `fabricPathDn`:
+   - `paths-N/pathep-[eth1/X]` → access port node N eth1/X. PG via
+     **aci_access_policy_chain** Path PG.
+   - `protpaths-N1-N2/pathep-[B]` / `paths-N/pathep-[B]` (B not `eth`) → vPC/PC.
+     `B` is the bundle policy-group name and usually `<TEAM>_<SERIAL>` = the
+     server. Member ports: Path PORTS in aci_access_policy_chain.
+3. 0 results → the MAC may be a directly attached neighbor's chassis/port ID.
+   One query covers both LLDP fields:
+   `/api/node/class/lldpAdjEp.json?query-target-filter=or(wcard(lldpAdjEp.chassisIdV,"aabb.ccdd.eeff"),wcard(lldpAdjEp.portIdV,"aabb.ccdd.eeff"))`
+   then the same on `cdpAdjEp` (`devId`/`portId` fields if chassisIdV absent).
+   The adjacency dn `topology/pod-1/node-N/sys/lldp/inst/if-[eth1/X]/adj-1` →
+   node N eth1/X. Try the MAC formats APIC uses (`aa:bb:..`, `aabb.ccdd.eeff`).
+4. Still nothing → "MAC not learned and not an LLDP/CDP neighbor"; likely
+   causes in **aci_endpoint_troubleshooting**.
 
-Key fields:
-- `mac` — the endpoint MAC.
-- `fabricPathDn` — WHERE it is learned (the most important field).
-- `encap` — the VLAN (e.g. `vlan-354`).
-- `bdDn` — the bridge domain.
-- `dn` — parse for tenant / app profile / EPG (`uni/tn-T/ap-AP/epg-EPG/...`).
+## Path B — serial / interface-profile name → ALL attachments
 
-### A2. Parse `fabricPathDn` into node + port
+B1. Data-candidate profiles (contain the serial token):
+`/api/node/class/infraAccPortP.json?query-target-filter=wcard(infraAccPortP.name,"<SERIAL>")`
+Collect ALL hits (`MSY_<SERIAL>`, `MSY_<SERIAL>_DATA`, `CSY_<SERIAL>` …). 0 hits
+→ retry upper-case / a shorter fragment once, then also try the bundle name
+`/api/node/class/fabricPathEp.json?query-target-filter=wcard(fabricPathEp.name,"<SERIAL>")`
+(gives the vPC/PC path directly). Still 0 → not found; stop.
 
-- `paths-<NODE>/pathep-[eth1/X]` → single access port on node `<NODE>`. Record
-  node + port. Policy group is NOT in `fabricPathDn` for access — if the user
-  asks for the policy group next, hand off to **aci_access_policy_chain Path PG**
-  with this node + eth port (do not re-query fvCEp).
-- `protpaths-<N1>-<N2>/pathep-[<BUNDLE>]` or `paths-<NODE>/pathep-[<BUNDLE>]`
-  (bundle name, not `eth...`) → vPC or PC. **`<BUNDLE>` is already the
-  policy-group name** (`infraAccBndlGrp`). Record it immediately. You MUST still
-  expand the bundle to member physical ports and node IDs: find the interface
-  profile(s) that reference this bundle via `infraRsAccBaseGrp.tDn` ending in
-  `accbundle-<BUNDLE>`, read their `infraPortBlk` eth ranges, and resolve nodes
-  via switch profile `infraRsAccPortP` → `infraNodeBlk` (see
-  aci_access_policy_chain). Do NOT search policy-group classes by MAC or eth
-  port string.
+B2. Ports + PG per profile: `/api/node/mo/<profile dn>.json?rsp-subtree=full`.
+For EACH `infraHPortS` keep its `infraPortBlk` ports and its own
+`infraRsAccBaseGrp.tDn` (= policy group; `accbundle-` → PC/vPC, `accportgrp-` → access).
 
-Collect ALL physical ports — direct-attached ports and every member port of any
-port-channel/vPC.
+B3. Switch profiles (batch all profiles in one call):
+`/api/node/class/infraRsAccPortP.json?query-target-filter=or(eq(infraRsAccPortP.tDn,"<dn1>"),eq(infraRsAccPortP.tDn,"<dn2>"))`
+→ unique `nprof-<SWPROF>`.
 
-### A3. Fallback when `fvCEp` returns 0 results
+B4. Node IDs: `/api/node/mo/uni/infra/nprof-<SWPROF>.json?rsp-subtree=full`
+→ `infraNodeBlk.from_`/`to_` (node IDs) AND every `infraRsAccPortP.tDn` (all
+interface profiles on that switch profile — needed for B5). Several switch
+profiles → collect all nodes.
 
-The MAC may be a directly-attached neighbor's chassis/port ID rather than a
-learned host. Try the adjacency tables:
+B5. Management candidates: interface profiles from B4 whose name does NOT
+contain the serial. Resolve them with B2 (ports + PG) and label them
+"management candidate". Do not merge their data into the server's data ports.
 
-```
-/api/node/class/lldpAdjEp.json?query-target-filter=or(wcard(lldpAdjEp.chassisIdV,"AABB.CCDD.EEFF"),wcard(lldpAdjEp.portIdV,"AABB.CCDD.EEFF"))
-```
+Result: every (node × port) with profile, selector, PG, type (access/PC/vPC)
+and data/management label. Typical dual-homed host: 2 data + 2 management
+ports across 2 leaves; a PC may sit on one leaf — report what APIC returns.
 
-Then `cdpAdjEp` with the same filter on `cdpAdjEp.chassisIdV` / `cdpAdjEp.portIdV`.
-The adjacency dn is `topology/pod-1/node-<N>/sys/lldp/inst/if-[eth1/X]/adj-...`
-→ the local attachment is `node-<N>` + `eth1/X`.
+## Path C — free hostname
 
-If still nothing, the MAC is not learned and not an adjacency — report that
-plainly (see aci_endpoint_troubleshooting for the likely causes).
+1. If the hostname contains a serial-like token or a `<TEAM>_` prefix → Path B.
+2. Otherwise the host may announce itself over LLDP/CDP (ESXi, many servers):
+   `/api/node/class/lldpAdjEp.json?query-target-filter=wcard(lldpAdjEp.sysName,"<host>")`
+   then `/api/node/class/cdpAdjEp.json?query-target-filter=wcard(cdpAdjEp.devId,"<host>")`.
+   Adjacency dn → node + eth port; then Path PG for its policy group (its PG /
+   interface profile name usually reveals the serial → Path B for the full set).
+3. For an ESXi host also: `/api/node/class/compHv.json?query-target-filter=wcard(compHv.name,"<host>")`
+   (VMM inventory; see **aci_vmm_visibility**).
+4. Nothing anywhere → not found; list what you searched.
 
----
+## After resolution — hand off
 
-## Path B — serial / interface-profile name → ALL node + port attachments
+- Policy group / AEP / domain of the port → **aci_access_policy_chain** (PG
+  is often already captured in B2 — reuse it).
+- EPGs / VLANs on the server's ports → **aci_epg_bindings** B.
+- Port up/down, CRC → **aci_interface_troubleshooting**; faults → **aci_fault_investigation**; vPC state → **aci_vpc_health**.
 
-### B1. Find ALL data-candidate interface profiles
+Location tasks are complete once the attachment set is collected; do not query
+`l1PhysIf`/`ethpmPhysIf` unless the user asked about port state.
 
-```
-/api/node/class/infraAccPortP.json?query-target-filter=wcard(infraAccPortP.name,"CX124553KT")
-```
+## Answering
 
-Collect ALL returned interface profiles whose name contains the serial token
-(e.g. `MSY_<SERIAL>`, `MSY_<SERIAL>_DATA`, `CSY_<SERIAL>`). These are
-data-candidate profiles. Do NOT stop at the first match.
-
-Do NOT invent suffixes like `_DATA` or `_MGMT` if they were not returned by
-APIC. Use only names that actually exist.
-
-### B2. Resolve each data-candidate profile to node + port(s)
-
-```
-/api/node/mo/<profile_dn>.json?rsp-subtree=full
-```
-
-From each profile subtree, read `infraPortBlk.fromCard` / `fromPort` (and
-`toCard` / `toPort` if a range) to extract the physical port set. On the same
-subtree, also capture `infraRsAccBaseGrp.tDn` (policy group DN/name). If the
-user's question is (or becomes) "what is the policy group", that relation is
-the answer — do not start a separate blind search.
-
-### B3. Reverse-lookup switch profile(s) for each profile
-
-```
-/api/node/class/infraRsAccPortP.json?query-target-filter=eq(infraRsAccPortP.tDn,"<profile_dn>")
-```
-
-Extract `nprof-<SWPROF>` from each result dn and keep all unique switch
-profiles.
-
-### B4. Get node ID(s) from each switch profile
-
-```
-/api/node/mo/uni/infra/nprof-SWPROF.json?rsp-subtree=full&rsp-subtree-class=infraNodeBlk
-```
-
-`infraNodeBlk.from_` / `to_` → the node IDs.
-
-If the profile is bound by more than one switch profile (VCF multi-node access),
-repeat and collect ALL node IDs. Each (node × port) is a physical attachment
-point to check.
-
-### B5. Add management-candidate profiles from the SAME switch profile(s)
-
-After data-candidate profiles are resolved, enumerate other interface profiles
-attached to the same switch profile(s) and include them as management
-candidates when their profile name does NOT include the serial token.
-
-Practical rule used in this environment:
-- profile name includes serial token → data candidate
-- profile name does NOT include serial token (but attached to same nprof) →
-  management candidate
-
-Resolve management candidates with the same B2-B4 chain and merge into one final
-attachment set.
-
-Expected outcome for dual-homed hosts in this fabric: often 4 ports total
-(2 data + 2 management across 2 leaves). Do NOT stop after finding one port.
-
-Port-channel note: for PC-based attachments, all member ports can be on the
-same leaf; report exactly what APIC returns (do not force two-leaf symmetry).
-
----
-
-## After resolution
-
-You now have node ID(s) + physical port(s) (and, for bundles or interface
-profiles, often the policy-group name already). Hand off to whichever skill the
-task needs — the resolution itself is done:
-
-- **Policy group / AEP / access-policy of this port** → aci_access_policy_chain
-  **Path PG** (or report `infraRsAccBaseGrp.tDn` / bundle name if already
-  captured above). Do not re-resolve the MAC/serial.
-- Faults on the port/bundle → aci_fault_investigation.
-- Port up/down, speed, CRC/FCS/discards → aci_interface_troubleshooting.
-- List ALL EPGs bound to this server/interface profile (e.g. "what are epgs
-  on CZ24160G9N") -> aci_epgs_on_profile. Keep per-selector policy-group and
-  attachment evidence; resolution is not the final answer for this request.
-- Is an EPG bound / deployed there → aci_epg_deployment.
-- Why a VLAN is not deploying (full forward chain) → aci_access_policy_chain.
-
-## Good behavior
-
-- Pick ONE path by input type and stay on it; never run the MAC path for a
-  serial/name or vice versa.
-- A non-MAC name is never an endpoint — `fvCEp` is matched by MAC only.
-- `wcard` is case-sensitive; if an exact/`wcard` match returns 0, retry with a
-  shorter fragment or different case before concluding it does not exist.
-- Always expand a vPC/PC bundle to its member ports — do not stop at the bundle
-  name.
-- For serial-based resolution, aggregate all attachments (data + management)
-  before reporting. First-match answers are considered incomplete.
+Report per attachment: leaf (hostname via `fabricNode` if useful), port or
+bundle, profile, PG, data/management. If some steps failed (e.g. profile found
+but switch profile lookup empty), report the partial result and name the
+missing link. Only "not found" when every step of the chosen path was empty.

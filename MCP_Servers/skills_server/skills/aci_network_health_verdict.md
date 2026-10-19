@@ -16,7 +16,7 @@ Contracts are vzAny permitAny; filtering is on the firewall and OUT OF SCOPE. Th
 
 ## Workflow (this is a composed investigation — reuse the other skills)
 
-1. **Resolve the host(s)** to leaf/port(s): MAC -> aci_endpoint_troubleshooting; hostname -> aci_server_locator; VM name -> aci_vmm_visibility. Two hosts (e.g. RAC nodes that cannot talk) -> resolve both.
+1. **Resolve the host(s)** to leaf/port(s): MAC -> aci_endpoint_troubleshooting; hostname/serial -> aci_resolve_identifier; VM name -> aci_vmm_visibility. Two hosts (e.g. RAC nodes that cannot talk) -> resolve both.
 2. **Endpoint stability**: is each MAC learned, on ONE consistent path? Learned on multiple paths or endpoint-move history -> flag flapping.
 3. **Port health on EVERY uplink** (aci_interface_troubleshooting): adminSt/operSt, operStQual if down, operSpeed (must be >= 10G here), CRC/FCS/errors/discards — interpreted per that skill's rules (note the single-snapshot limitation honestly).
 4. **Faults, 48h window** (aci_fault_investigation): scoped `faultInst` + `faultRecord` on each **resolved** port, bundle, and EPG only. Every history query must use small `page-size` (≤ 50), `order-by`, and **page=0 only** — never fabric-wide unpaged `faultRecord` and never multi-page crawls.

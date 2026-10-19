@@ -1,16 +1,16 @@
 # ACI Object Map — identify what a name is and which class to query
 
-Use this skill at the START of almost any troubleshooting task: it tells you what kind of ACI object a name refers to and which class to query, so you go straight to the right class instead of probing classes one by one.
+Type → class/DN lookup table: maps "EPG, BD, policy group, AEP, VMM domain, VLAN pool, interface profile, switch…" to the exact ACI class, DN shape and relation objects.
 
 ## Core rule
 
 If the user names the TYPE of object, query that type's class DIRECTLY. "the XXX bridge domain" means query fvBD for XXX — do NOT look at interface profiles, policy groups, or other classes first. Probing wrong classes one by one is the main cause of slow, failed lookups. Map the stated type to its class with the table below, then query only that class.
 
-If the user gives only a name with no type, use the aci_search_techniques skill.
+If the user gives only a name with no type, classify it with aci_naming_conventions.
 
-Use aci_inventory_validation when the user asks how many or how much of something exists in the fabric.
-
-Use aci_object_inspection when the user names a specific object and asks about its properties or what is attached to it (static bindings, domains, subnets, ports).
+Use aci_inventory_validation for "how many". Use aci_object_summary to
+summarize one named object, aci_access_policy_chain for port/PG/AEP/domain
+relations, and aci_epg_bindings for EPG static bindings.
 
 ## Type -> class map
 
@@ -23,9 +23,11 @@ Use aci_object_inspection when the user names a specific object and asks about i
 | EPG | fvAEPg | uni/tn-T/ap-AP/epg-NAME |
 | subnet / gateway | fvSubnet | under a BD or EPG |
 | endpoint / host / MAC | fvCEp | learned endpoint (query by MAC) |
-| static binding (EPG-to-port) | fvRsPathAtt | under an EPG |
-| contract | vzBrCP | uni/tn-T/brc-NAME |
-| filter | vzFilter | uni/tn-T/flt-NAME |
+| static binding (EPG-to-port) | fvRsPathAtt | under an EPG (tDn, encap, mode) |
+| static leaf binding | fvRsNodeAtt | under an EPG |
+| AEP-level EPG binding | infraRsFuncToEpg | uni/infra/attentp-A/gen-default |
+| VMM dynamic deployment (operational) | fvIfConn | uni/epp/fv-[EPG dn]/node-N/dyatt-[path]/... |
+| fabric path endpoint (port / PC / vPC path) | fabricPathEp | topology/pod-1/(prot)paths-.../pathep-[...] |
 | L3Out | l3extOut | uni/tn-T/out-NAME |
 | external EPG | l3extInstP | under an L3Out |
 | L3Out logical node profile (border leaves) | l3extLNodeP | under an L3Out (see aci_l3out_troubleshooting) |
@@ -47,6 +49,14 @@ Use aci_object_inspection when the user names a specific object and asks about i
 | port-channel / vPC aggregate interface | pcAggrIf | under a node; operSt + members |
 | vPC protection group (leaf pair) | fabricExplicitGEp | uni/fabric/protpol/expgep-NAME |
 | AEP | infraAttEntityP | uni/infra/attentp-NAME |
+| VLAN pool | fvnsVlanInstP | uni/infra/vlanns-[NAME]-static / -dynamic |
+| VLAN range (encap block) | fvnsEncapBlk | under a VLAN pool (from, to) |
+| link level policy | fabricHIfPol | uni/infra/hintfpol-NAME |
+| CDP / LLDP interface policy | cdpIfPol / lldpIfPol | uni/infra/cdpIfP-NAME / lldpIfP-NAME |
+| port-channel (LACP) policy | lacpLagPol | uni/infra/lacplagp-NAME |
+| MCP / STP / L2 interface policy | mcpIfPol / stpIfPol / l2IfPol | uni/infra/mcpIfP- / ifPol- / l2IfP-NAME |
+| switch (leaf) policy group | infraAccNodePGrp | uni/infra/funcprof/accnodepgrp-NAME |
+| vCenter of a VMM domain | vmmCtrlrP | uni/vmmp-VMware/dom-D/ctrlr-NAME |
 | physical domain | physDomP | uni/phys-NAME |
 | L3 domain | l3extDomP | uni/l3dom-NAME |
 | VMM domain | vmmDomP | uni/vmmp-VENDOR/dom-NAME |
@@ -75,6 +85,10 @@ To read one object plus its children: /api/node/mo/<DN>.json?rsp-subtree=full
 - EPG -> domain: fvRsDomAtt
 - policy group -> AEP: infraRsAttEntP
 - AEP -> domain: infraRsDomP
+- AEP -> EPG (deployed on all AEP ports): infraRsFuncToEpg
+- EPG -> port/bundle: fvRsPathAtt (tDn = fabric path)
+- policy group -> interface policies: infraRsHIfPol, infraRsCdpIfPol,
+  infraRsLldpIfPol, infraRsLacpPol, infraRsMcpIfPol, infraRsStpIfPol, infraRsL2IfPol
 - domain -> VLAN pool: infraRsVlanNs
 - interface profile -> policy group: infraRsAccBaseGrp (under the port selector)
 - switch profile -> interface profile: infraRsAccPortP
@@ -83,17 +97,16 @@ To read one object plus its children: /api/node/mo/<DN>.json?rsp-subtree=full
   interface profile subtree → matching infraPortBlk → infraRsAccBaseGrp.tDn
   (full procedure: aci_access_policy_chain Path PG). Never filter
   infraAccPortGrp/infraAccBndlGrp by eth port or MAC.
+- Every relation can be walked in reverse with
+  eq(<RelClass>.tDn,"<target dn>") — see the cheat sheet in aci_access_policy_chain.
 - L3Out -> VRF: l3extRsEctx
 - L3Out border node -> node + router ID: l3extRsNodeL3OutAtt (rtrId)
 - L3Out interface -> physical path: l3extRsPathL3OutAtt
 
-## Naming conventions in this environment
+## Naming conventions
 
-Use naming to guess the type from a name before querying.
+Site naming (MSY_/CSY_/SG_ prefixes, serial-named profiles and bundles, pod
+and node ID ranges, switch hostnames) lives in **aci_naming_conventions**.
 
-- MSY_ prefix means: Main Banking Servers Team's host is connected.
-- CSY_ prefix means: Subsidiary Banking Systems team has hosts connected.
-- SG_ prefix means: System Security Team has something connected here. Probably a firewall or SSL_VPN device.
-- A name like MSY_<SERIAL> (prefix + device serial provided by another team) is almost always an interface policy group (infraAccBndlGrp or infraAccPortGrp), NOT an EPG.
-- Pod number: always pod-1
-- Leaf node IDs: 101-198 ; Spine node IDs: 401-402
+Contracts, subjects and filters are out of scope (vzAny permitAny) — they are
+intentionally not mapped here.
