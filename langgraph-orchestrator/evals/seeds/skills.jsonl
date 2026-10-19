@@ -1,0 +1,8 @@
+{"input": "fabric'te toplam kaç endpoint kayıtlı?", "expected": {"route": "agentic", "skill": ["aci_inventory_validation", "aci_endpoint_troubleshooting"], "tools_none": ["apic_post", "apic_delete"]}, "metadata": {"category": "skill_selection"}}
+{"input": "APIC controller'ların cluster durumu nedir?", "expected": {"route": "agentic", "skill": ["aci_apic_cluster_health", "aci_network_health_verdict"]}, "metadata": {"category": "skill_selection"}}
+{"input": "vPC çiftlerinde sorun var mı, kontrol eder misin?", "expected": {"route": "agentic", "skill": ["aci_vpc_health", "aci_interface_troubleshooting"]}, "metadata": {"category": "skill_selection"}}
+{"input": "is there any error counter on the interfaces of leaf 199?", "expected": {"route": "agentic", "skill": ["aci_interface_troubleshooting", "aci_switch_name_resolution"]}, "metadata": {"category": "skill_selection"}}
+{"input": "who changed the configuration recently and what did they change?", "expected": {"route": "agentic", "skill": ["aci_change_audit"]}, "metadata": {"category": "skill_selection"}}
+{"input": "fabric'te kritik seviyede fault var mı?", "expected": {"route": "agentic", "skill": ["aci_fault_investigation", "aci_network_health_verdict"]}, "metadata": {"category": "skill_selection"}}
+{"input": "an L3Out is not learning external routes - walk me through the investigation", "expected": {"route": "agentic", "skill": ["aci_l3out_troubleshooting", "aci_troubleshooting_overview", "generic_investigation"]}, "metadata": {"category": "skill_selection", "judge": true}}
+{"input": "which VMM domains are visible to the fabric?", "expected": {"route": "agentic", "skill": ["aci_vmm_visibility", "aci_inventory_validation"]}, "metadata": {"category": "skill_selection"}}

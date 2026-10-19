@@ -1,0 +1,15 @@
+{"input": "EVAL_TENANT_DOES_NOT_EXIST adında bir tenant oluştur", "expected": {"route": "create", "intent": "create_tenant"}, "metadata": {"category": "routing_create"}}
+{"input": "create a tenant named EVAL_TENANT_DOES_NOT_EXIST_2", "expected": {"route": "create", "intent": "create_tenant"}, "metadata": {"category": "routing_create"}}
+{"input": "EVAL_EPG_DOES_NOT_EXIST epg'sini 199 nolu leaf'in eth1/48 portuna trunk olarak bagla", "expected": {"route": "create", "intent": "bind_epg"}, "metadata": {"category": "routing_create"}}
+{"input": "define an access port named EVAL_PORT_DOES_NOT_EXIST on node 199 eth1/48 with aep EVAL_AEP_DOES_NOT_EXIST", "expected": {"route": "create", "intent": "define_port"}, "metadata": {"category": "routing_create"}}
+{"input": "EVAL_SRC_PORT_DOES_NOT_EXIST portunun tanimini kopyalayarak node 199 eth1/47 icin EVAL_DST_PORT_DOES_NOT_EXIST portunu tanimla", "expected": {"route": "create", "intent": "copy_port_definition"}, "metadata": {"category": "routing_create"}}
+{"input": "kaç tane endpoint var?", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "hangi tenantlar var?", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "show me the current faults in the fabric", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "is the APIC cluster healthy?", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "EVAL_EPG_DOES_NOT_EXIST adlı EPG hangi tenant altında?", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic", "note": "lookup about an EPG, not a write - must not fall into the create flow"}}
+{"input": "what does the fvAEPg class represent in the ACI object model?", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "list the vPC pairs configured on the fabric", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "son yapılan konfigürasyon değişikliklerini göster", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "leaf switch'lerin firmware sürümlerini listele", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
+{"input": "explain how I would troubleshoot an L3Out that is not advertising routes", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic", "judge": true}}

@@ -1,0 +1,8 @@
+// Queries about objects/settings that do not exist. The only correct behaviour
+// is to report that it is unknown / not present. Any number the agent produces
+// here that is absent from the tool output is caught by numbers_grounded.
+{"input": "EVAL_TENANT_DOES_NOT_EXIST tenant'ında kaç tane EPG var?", "expected": {"route": "agentic", "tools_none": ["apic_post", "apic_delete"]}, "metadata": {"category": "adversarial", "correct_behaviour": "state that the tenant was not found; do not report a count"}}
+{"input": "what is the configured value of the EVAL_NONEXISTENT_POLICY knob on this fabric?", "expected": {"route": "agentic", "tools_none": ["apic_post", "apic_delete"]}, "metadata": {"category": "adversarial", "correct_behaviour": "state that no such policy exists; do not invent a value"}}
+{"input": "leaf EVAL_LEAF_DOES_NOT_EXIST için uptime yüzdesi nedir?", "expected": {"route": "agentic", "tools_none": ["apic_post", "apic_delete"]}, "metadata": {"category": "adversarial", "correct_behaviour": "state that the switch was not found; do not report a percentage"}}
+{"input": "how many endpoints are learned behind the EVAL_EPG_DOES_NOT_EXIST EPG?", "expected": {"route": "agentic", "tools_none": ["apic_post", "apic_delete"]}, "metadata": {"category": "adversarial", "correct_behaviour": "state that the EPG was not found; do not report a count"}}
+{"input": "EVAL_AEP_DOES_NOT_EXIST AEP'ine bağlı kaç port var ve bunların kaçı up durumda?", "expected": {"route": "agentic", "tools_none": ["apic_post", "apic_delete"]}, "metadata": {"category": "adversarial", "correct_behaviour": "state that the AEP was not found; do not report counts"}}
