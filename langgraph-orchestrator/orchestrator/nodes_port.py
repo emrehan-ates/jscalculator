@@ -170,8 +170,49 @@ def _expand_port_block(attrs):
     return [f"eth{fc}/{p}" for p in range(fpN, tpN + 1)]
 
 
+MGMT_SCOPES = {"management", "mgmt", "all", "both"}
+
+
 async def resolve_port_ref(ref):
     """Resolve a port reference to its static-binding tDn(s).
+
+    A {"serial"} reference may carry "scope":
+      - "data" (default): the host's own interface profile (below);
+      - "management": the host's management ports, found in the shared
+        ESXI-Infra-<leaf> interface profiles by port-block description
+        (see mgmt_ports.py); optional "nodes" limits the leaves checked;
+      - "all": data + management paths together.
+    """
+    scope = str((ref or {}).get("scope") or "data").strip().lower() if isinstance(ref, dict) else "data"
+    if scope not in MGMT_SCOPES or not isinstance(ref, dict) or not (ref.get("serial") or ref.get("name")):
+        return await _resolve_data_port_ref(ref)
+
+    from .mgmt_ports import resolve_management_ports
+    host = (ref.get("serial") or ref.get("name")).strip()
+    mg = await resolve_management_ports(host, ref.get("nodes"))
+    if scope in ("management", "mgmt"):
+        if mg.get("error"):
+            return {"error": mg["error"]}
+        return {"tdns": mg["tdns"], "tdn": mg["tdns"][0], "kind": "management",
+                "nodes": list(dict.fromkeys(p["node"] for p in mg["ports"])),
+                "label": mg["label"], "error": None}
+
+    data = await _resolve_data_port_ref({"serial": host})
+    if data.get("error") and mg.get("error"):
+        return {"error": f"data ports: {data['error']}; management ports: {mg['error']}"}
+    tdns = list(dict.fromkeys((data.get("tdns") or []) + (mg.get("tdns") or [])))
+    labels = [x for x in (data.get("label") if not data.get("error") else None,
+                          mg.get("label") if not mg.get("error") else None) if x]
+    missing = ("data" if data.get("error") else "management" if mg.get("error") else None)
+    label = " + ".join(labels) + (f" [no {missing} ports found]" if missing else "")
+    return {"tdns": tdns, "tdn": tdns[0], "kind": "all",
+            "nodes": list(dict.fromkeys((data.get("nodes") or [])
+                                        + [p["node"] for p in mg.get("ports", [])])),
+            "label": label, "error": None}
+
+
+async def _resolve_data_port_ref(ref):
+    """Resolve a data-port reference to its static-binding tDn(s).
 
     ref is either {"node","port"} (explicit leaf+port) or
     {"serial": "..."} (a device serial OR a full interface-profile name).

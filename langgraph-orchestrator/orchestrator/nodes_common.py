@@ -232,6 +232,8 @@ Respond ONLY with a JSON object. Examples:
 {"intent": "bind_epg", "flow": "create", "params": {"epgs": ["PROD_DB"], "mode": "trunk", "bindings": [{"node": "DR2-B05-10", "port": "eth1/5"}]}, "target_class": "fvRsPathAtt"}
 {"intent":"copy_epg_bindings","flow":"create","params":{"source":{"node":"DR1-C6-8","port":"eth1/12"},"destinations":[{"node":"103","port":"eth1/14"}]},"target_class":"fvRsPathAtt"}
 {"intent":"copy_epg_bindings","flow":"create","params":{"source":{"serial":"MSY_CX124553KT"},"destinations":[{"serial":"CX2204300RT"},{"serial":"CZ24160G9N"},{"node":"101","port":"eth1/5"}]},"target_class":"fvRsPathAtt"}
+{"intent": "bind_epg", "flow": "create", "params": {"epgs": ["ESX_MGMT_110"], "mode": "trunk", "bindings": [{"serial": "CX124553KT", "scope": "management"}]}, "target_class": "fvRsPathAtt"}
+{"intent":"copy_epg_bindings","flow":"create","params":{"source":{"serial":"CX124553KT","scope":"management"},"destinations":[{"serial":"CZ24160G9N","scope":"management"},{"serial":"CX2204300RT","scope":"management"}]},"target_class":"fvRsPathAtt"}
 {"intent":"copy_port_definition","flow":"create","params":{"name":"CZ241809QS","source":"CZ241908H2","nodes":["125"],"ports":["eth1/47"]},"target_class":"infraAccPortGrp"}
 {"intent": "agentic", "flow": "agentic", "params": {}, "target_class": ""}
 
@@ -250,6 +252,14 @@ PARAM RULES:
       finds the profile). Non-host objects that do not follow the TEAM_SERIAL
       convention are given by full name in the SAME "serial" field. The program
       finds ALL of the device's ports (every access port, or the PC/vPC bundle).
+      Add "scope" to a {"serial"} entry when the user means the host's
+      MANAGEMENT ports ("management", "mgmt", "yönetim", "management portları"):
+        "scope": "management" -> only the management ports,
+        "scope": "all"        -> data AND management ports ("tüm portları",
+                                 "data ve management"),
+        omit scope            -> the data ports (default).
+      Management ports are found automatically in the ESXI-Infra-<leaf>
+      profiles; NEVER invent management leaf/port values.
     * {"node": "<leaf id>", "port": "eth1/x"} — an explicit single leaf port.
       The "node" value may be a switch hostname (e.g. "DR1-C6-8") instead of a
       numeric ID — the system resolves it automatically.
@@ -285,7 +295,10 @@ PARAM RULES:
   {"node": "<n1>", "node2": "<n2>", "policy_group": "<bundle>"}. If the user
   gives several ports on the same leaf ("101 eth1/5, eth1/6"), make one entry
   per port. NEVER invent tenant, app_profile, encap, or mode — they are read
-  from the source port automatically. NEVER invent a destination.
+  from the source port automatically. NEVER invent a destination. A
+  {"serial"} source or destination may carry "scope": "management" | "all"
+  exactly as in bind_epg (e.g. "copy the management port EPGs of host A to
+  host B's management ports").
 - copy_port_definition: extract "name" (the NEW port's TEAM_SERIAL name),
   "source" (the existing port/device serial to copy from — substring match, keep
   any TEAM_ prefix), "nodes" (LIST of leaf IDs for the NEW port; the program

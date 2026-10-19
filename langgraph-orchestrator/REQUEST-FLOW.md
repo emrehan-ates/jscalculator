@@ -705,6 +705,27 @@ Intent `copy_epg_bindings` ise `_build_copy_bindings()` calisir.
 
 Kopyalama additive merge'dir; hedefteki mevcut binding'leri silmez.
 
+### Management portlari (create + agentic)
+
+Host'un management portlari kendi `<TEAM>_<SERIAL>` profilinde degil, her
+leaf'teki ortak `ESXI-Infra-<leaf>` interface profilindedir (`-`/`_` 4
+kombinasyon). Icindeki selector'lerde (`ESXI-Infra-MSY-<leaf>` vb.) port
+block description'i host'u iceren blok management portudur.
+`orchestrator/mgmt_ports.py::resolve_management_ports()`:
+
+1. Kontrol edilecek leaf'ler: verilen `nodes`, yoksa host'un data profilinin
+   leaf'leri (109+110'a bagli host icin ikisi de).
+2. Her leaf icin 4 yazimi tek `or(eq(...))` sorgusunda arar; bulamazsa
+   case-insensitive `wcard` fallback.
+3. Profil subtree'sinde description eslesen port block'lari -> leaf (profil
+   adindaki numara) + eth portu.
+4. Hic leaf bilinmiyorsa tek `infraPortBlk.descr` aramasi (sadece ESXI-Infra).
+
+Create flow'larda `{"serial": ..., "scope": "management" | "all"}` port
+referansi `resolve_port_ref()` uzerinden bu cozumleyiciyi kullanir
+(`bind_epg`, `bind_vmm_domain`, `copy_epg_bindings` kaynak/hedef). Agentic
+flow'da ayni mantik `find_management_ports` tool'u olarak kayitlidir.
+
 ## 12. Switch Adi Cozme Detayi
 
 `resolve_node_name(name_input, convention)` bircok create helper'i tarafindan

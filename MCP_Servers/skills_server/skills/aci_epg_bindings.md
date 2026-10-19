@@ -52,6 +52,8 @@ Report: tenant / AP / EPG, binding count, table `leaf(s) | port or bundle | enca
      Access PG → path `paths-N/pathep-[ethX/Y]`. PC/vPC PG → bundle path.
    - server serial / interface profile → **aci_resolve_identifier** Path B,
      keeping each selector's PG; then same rule per selector.
+   - management ports of a host → `find_management_ports(host=...)`; use the
+     returned `tdns` (access paths on the ESXI-Infra ports).
    - policy group name → access: its ports (Path PORTS) → eth paths;
      bundle: `/api/node/class/fabricPathEp.json?query-target-filter=eq(fabricPathEp.name,"<BUNDLE>")`
      → keep paths whose nodes belong to the resolved switch profiles.
@@ -70,7 +72,7 @@ Report: tenant / AP / EPG, binding count, table `leaf(s) | port or bundle | enca
 
 Report: per target, distinct EPG count + table
 `tenant | AP | EPG | encap | mode | via (static path / AEP / VMM)`.
-Management-candidate profiles (see naming conventions) go in a separate section.
+If both data and management ports were asked, report them in separate sections.
 
 ## C. EPGs of a VLAN
 

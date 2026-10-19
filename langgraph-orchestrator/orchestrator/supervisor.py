@@ -12,6 +12,7 @@ from .nodes_common import (recognize_intent, set_tools, interpret_operation,
 from .graph_create import build_create_graph, build_prepare_graph, build_execute_graph
 from .graph_agentic import build_agentic_graph
 from .agentic_aci_kb import aci_lookup_class
+from .mgmt_ports import find_management_ports
 from .chat_memory import normalize_chat_history
 from .mcp_runtime import get_runtime_manager
 from .nodes_agentic import MAX_AGENT_ITERATIONS
@@ -32,6 +33,7 @@ async def _load_tools(fabric):
     """
     registry = await get_runtime_manager().get_registry(fabric)
     registry[aci_lookup_class.name] = aci_lookup_class
+    registry[find_management_ports.name] = find_management_ports
     set_tools(registry)
 
 def _new_state(user_input, chat_history=None):
@@ -74,7 +76,11 @@ async def _resolve_port_bindings(bindings, intent, user_input, trail):
         ref = b.get("serial") or b.get("name")
         has_explicit = b.get("tdn") or (b.get("node") and (b.get("port") or b.get("policy_group") or b.get("vpc")))
         if ref and not has_explicit:
-            res = await resolve_port_ref({"serial": ref})
+            pref = {"serial": ref}
+            for k in ("scope", "nodes"):
+                if b.get(k):
+                    pref[k] = b[k]
+            res = await resolve_port_ref(pref)
             if res.get("error"):
                 return None, {"flow": "create", "intent": intent, "user_input": user_input,
                               "errors": [f"Port lookup failed for '{ref}': {res['error']}"],
@@ -96,7 +102,7 @@ async def _build_binding(params, user_input):
 
     bindings = params.get("bindings")
     if not bindings:
-        single = {k: params[k] for k in ("node", "port", "node2", "policy_group", "vpc", "serial", "name") if params.get(k)}
+        single = {k: params[k] for k in ("node", "port", "node2", "policy_group", "vpc", "serial", "name", "scope") if params.get(k)}
         bindings = [single] if single else []
 
     mode = params.get("mode", "regular")
@@ -182,7 +188,7 @@ async def _build_vmm_binding(params, user_input):
 
     bindings = params.get("bindings")
     if not bindings:
-        single = {k: params[k] for k in ("node", "port", "node2", "policy_group", "vpc", "serial", "name") if params.get(k)}
+        single = {k: params[k] for k in ("node", "port", "node2", "policy_group", "vpc", "serial", "name", "scope") if params.get(k)}
         bindings = [single] if single else []
     if not bindings:
         return {"flow": "create", "intent": intent, "user_input": user_input,
@@ -408,7 +414,9 @@ def _copy_destinations(params):
 
 def _ref_label(ref):
     if ref.get("serial") or ref.get("name"):
-        return str(ref.get("serial") or ref.get("name"))
+        scope = str(ref.get("scope") or "").lower()
+        suffix = f" ({scope})" if scope and scope != "data" else ""
+        return str(ref.get("serial") or ref.get("name")) + suffix
     if ref.get("node2"):
         return f"leaf{ref.get('node')}-{ref.get('node2')} {ref.get('policy_group') or ref.get('vpc') or ''}".strip()
     return f"leaf{ref.get('node', '?')} {ref.get('port', '')}".strip()

@@ -46,12 +46,24 @@ Consequences:
   but they are different objects. Confirm with the selector's
   `infraRsAccBaseGrp.tDn` before saying "the policy group is X".
 - Do not invent suffixes (`_DATA`, `_MGMT`). Use only names APIC returns.
-- **Management ports:** interface profiles bound to the SAME switch profile(s)
-  as the server's data profile but WITHOUT the serial token are *management
-  candidates*. Label them as candidates — sharing a switch profile is not
-  proof that they belong to the server.
 - Dual-homed hosts typically have 4 ports: 2 data + 2 management across 2
   leaves. A PC can have all members on one leaf. Report what APIC returns.
+
+## Management ports (ESXI-Infra profiles)
+
+A host's management ports are NOT in its own `<TEAM>_<SERIAL>` profile. Each
+leaf has ONE shared infra interface profile:
+
+| Object | Name pattern | Class |
+|---|---|---|
+| Infra interface profile of leaf N | `ESXI-Infra-N` — any mix of `-`/`_`: `ESXI-Infra-110`, `ESXI_Infra_110`, `ESXI-Infra_110`, `ESXI_Infra-110` | `infraAccPortP` |
+| Team selectors inside it (usually 2) | `ESXI-Infra-MSY-110`, `ESXI-Infra-CSY-110` | `infraHPortS` |
+| One host's management port | port block whose **description** contains the host serial/name | `infraPortBlk.descr` |
+
+So: management port of host H on leaf N = the `infraPortBlk` under
+`ESXI-Infra-N` whose `descr` mentions H. Check EVERY leaf the host's data ports
+are on (a host on 109 + 110 → look in ESXI-Infra-109 AND ESXI-Infra-110).
+Procedure and tool: **aci_resolve_identifier** "Management ports".
 
 ## EPG names
 

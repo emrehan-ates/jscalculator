@@ -1,6 +1,6 @@
 # ACI Resolve Identifier — find where a server/host is connected: MAC, serial, interface-profile name or hostname → leaf + port(s)
 
-Use for "where is server X / hangi porta bağlı", a MAC, serial (CX…/CZ…), MSY_/CSY_ profile name or ESXi hostname → leaf node + port(s), policy group and data/management attachments.
+Use for "where is server X / hangi porta bağlı", management (mgmt/yönetim) ports of a host, a MAC, serial (CX…/CZ…), MSY_/CSY_ name or ESXi hostname → leaf + port(s).
 
 Almost every port/fault/binding task starts here. This is the single source of
 truth for resolution chains; other skills reference it. Naming rules →
@@ -52,18 +52,50 @@ B3. Switch profiles (batch all profiles in one call):
 `/api/node/class/infraRsAccPortP.json?query-target-filter=or(eq(infraRsAccPortP.tDn,"<dn1>"),eq(infraRsAccPortP.tDn,"<dn2>"))`
 → unique `nprof-<SWPROF>`.
 
-B4. Node IDs: `/api/node/mo/uni/infra/nprof-<SWPROF>.json?rsp-subtree=full`
-→ `infraNodeBlk.from_`/`to_` (node IDs) AND every `infraRsAccPortP.tDn` (all
-interface profiles on that switch profile — needed for B5). Several switch
-profiles → collect all nodes.
+B4. Node IDs: `/api/node/mo/uni/infra/nprof-<SWPROF>.json?rsp-subtree=full&rsp-subtree-class=infraNodeBlk`
+→ `infraNodeBlk.from_`/`to_`. Several switch profiles → collect all nodes.
 
-B5. Management candidates: interface profiles from B4 whose name does NOT
-contain the serial. Resolve them with B2 (ports + PG) and label them
-"management candidate". Do not merge their data into the server's data ports.
+B5. Management ports (when the user asks for management/all ports, or the
+full attachment set): follow **Management ports** below with the B4 leaves.
 
 Result: every (node × port) with profile, selector, PG, type (access/PC/vPC)
 and data/management label. Typical dual-homed host: 2 data + 2 management
 ports across 2 leaves; a PC may sit on one leaf — report what APIC returns.
+
+## Management ports — ESXI-Infra-<leaf> profiles
+
+Management ports are NOT in the host's own profile. Each leaf N has a shared
+interface profile `ESXI-Infra-N` (any `-`/`_` mix) with team selectors such as
+`ESXI-Infra-MSY-N`; the port block whose **description** names the host is
+its management port (see **aci_naming_conventions**).
+
+**Fast path:** call the tool `find_management_ports(host="<serial or name>")`
+(add `nodes=["109","110"]` if the user named the leaves). It runs the steps
+below and returns leaf, port, profile, selector, description and binding path.
+
+Manual steps (same logic):
+
+M1. Leaves to check: the host's data leaves (B1–B4), or the leaves the user
+named. A host on 109 + 110 → check both.
+
+M2. Per leaf, ONE query covers all 4 spellings:
+`/api/node/class/infraAccPortP.json?query-target-filter=or(eq(infraAccPortP.name,"ESXI-Infra-110"),eq(infraAccPortP.name,"ESXI_Infra_110"),eq(infraAccPortP.name,"ESXI-Infra_110"),eq(infraAccPortP.name,"ESXI_Infra-110"))`
+0 results → `or(wcard(infraAccPortP.name,"nfra-110"),wcard(infraAccPortP.name,"nfra_110"))`
+and keep only names of the form ESXI?Infra?110.
+
+M3. Read it: `/api/node/mo/uni/infra/accportprof-<NAME>.json?rsp-subtree=full`.
+Under each `infraHPortS` (e.g. `ESXI-Infra-MSY-110`) check every
+`infraPortBlk.descr`; case-insensitive contains the serial (without the
+MSY_/CSY_ prefix) or the hostname → that block's `eth<fromCard>/<fromPort>`
+is the management port on leaf 110.
+
+M4. Leaf not known at all: one query
+`/api/node/class/infraPortBlk.json?query-target-filter=wcard(infraPortBlk.descr,"<SERIAL>")`
+and keep blocks whose dn is under an `accportprof-ESXI?Infra?N` profile.
+
+Report per leaf: management port, profile, selector, description. A leaf
+whose ESXI-Infra profile has no matching description is reported as
+"no management port found on leaf N" — keep the other leaf's result.
 
 ## Path C — free hostname
 
@@ -79,6 +111,8 @@ ports across 2 leaves; a PC may sit on one leaf — report what APIC returns.
 
 ## After resolution — hand off
 
+- EPGs on the management ports → **aci_epg_bindings** B with the paths
+  returned by `find_management_ports` (`tdns`).
 - Policy group / AEP / domain of the port → **aci_access_policy_chain** (PG
   is often already captured in B2 — reuse it).
 - EPGs / VLANs on the server's ports → **aci_epg_bindings** B.
@@ -90,6 +124,7 @@ Location tasks are complete once the attachment set is collected; do not query
 ## Answering
 
 Report per attachment: leaf (hostname via `fabricNode` if useful), port or
-bundle, profile, PG, data/management. If some steps failed (e.g. profile found
+bundle, profile, PG, data/management (management only from the ESXI-Infra
+description match — never guess it from other profiles). If some steps failed (e.g. profile found
 but switch profile lookup empty), report the partial result and name the
 missing link. Only "not found" when every step of the chosen path was empty.

@@ -92,6 +92,18 @@ HOW TO WORK
   serials, MSY_/CSY_/SG_ names and other site naming → aci_naming_conventions.
 - Contracts are out of scope (vzAny permitAny): never query vz* classes,
   fvRsCons or fvRsProv.
+
+MANAGEMENT PORTS OF A HOST (important)
+- When the user asks for a host's management / mgmt / yönetim ports (or "all
+  ports" incl. management), call find_management_ports(host=<serial or name>)
+  FIRST — optionally with nodes=[leaf IDs] if the user named the leaves. It
+  searches the ESXI-Infra-<leaf> interface profiles (all "-"/"_" spellings) on
+  every leaf the host is attached to and returns the port blocks whose
+  description names the host. Management ports are NOT in the host's own
+  MSY_/CSY_<SERIAL> profile. Manual procedure: skill aci_resolve_identifier,
+  section "Management ports".
+- For EPGs on the management ports, use the returned binding paths (tdns)
+  with aci_epg_bindings section B.
 - NEVER fabricate DNs, node IDs, or filter values. Resolve them from actual
   APIC data first. For example, if asked about faults for a named policy group,
   you MUST resolve the name to leaf node+port values (see the
@@ -513,7 +525,7 @@ _SKILL_KEYWORDS = {
         "msy_", "csy_", "sg_", "serial", "seri no", "naming",
     ],
     "resolve_identifier": [
-        "where is", "nerede", "hangi port", "which port", "connected to",
+        "management", "mgmt", "yönetim", "where is", "nerede", "hangi port", "which port", "connected to",
         "bağlı olduğu", "locate", "find server", "sunucu",
     ],
     "inventory_validation": [
