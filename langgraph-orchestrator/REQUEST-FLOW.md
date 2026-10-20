@@ -1056,3 +1056,23 @@ Request B / Fabric 2
 Shared ACI KB/Skills session'lari aynidir; APIC session'lari farklidir. Registry
 global olarak pool edilmedigi ve ContextVar request-local oldugu icin Fabric 1'in
 `apic_get` tool'u Fabric 2 istegine sizmaz.
+## Kimlik Dogrulama ve Kayit
+
+- **Kullanici deposu** (`users.py`): SQLite (`USERS_DB`), sifreler bcrypt hash.
+  Durumlar: `pending` -> `active` / `rejected`, ayrica `disabled`. Admin hesabi
+  `.env`'deki `ADMIN_*` degiskenlerinden her acilista olusturulur/guncellenir.
+- **Giris**: `password_auth_callback` sadece `active` kullaniciyi kabul eder ve
+  `tokens.issue_token()` ile imzali bir uygulama JWT'si (HS256, `APP_JWT_SECRET`,
+  `APP_JWT_TTL_HOURS`) uretir. Chainlit user metadata'sinda sadece bu token durur.
+- **Her mesaj/aksiyon**: `_session()` token'i dogrular (imza, sure, issuer) ve
+  kullanicinin hala aktif oldugunu ve `token_version`'in degismedigini kontrol
+  eder. Rol/takim/durum/sifre degisikligi `token_version`'i arttirir, eski
+  token'lar aninda gecersiz olur. Kullanici adi, rol, takim ve e-posta
+  SADECE dogrulanmis token'dan okunur.
+- **Kayit**: `/signup` sayfasi (`signup.py`, Chainlit'in FastAPI app'ine eklenir)
+  `pending` kullanici olusturur ve adminlere mail atar. Login sayfasina link
+  icin `.chainlit/config.toml` -> `[UI] custom_js = "/public/signup-link.js"`.
+- **Onay**: admin chat'te `signups` yazar; her talep icin Approve / Approve as
+  admin / Reject butonlari cikar, kullaniciya mail gider. `users` tum hesaplari
+  listeler. Rol/takim/durum degisikligi ve sifre sifirlama:
+  `python manage_users.py --help`.

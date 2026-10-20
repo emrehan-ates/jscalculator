@@ -1,5 +1,11 @@
 """Chainlit UI — create/bind/define_port (approval) + agentic reads/troubleshooting + auth + roles + chat history + persistent approval queue. English UI.
 
+Auth: users live in a SQLite store with bcrypt hashes (users.py); the admin
+comes from ADMIN_* in .env. Login issues an app JWT (tokens.py) that is
+verified on every message/action and is the only source of username, role,
+team and e-mail. New users request access at /signup (signup.py); admins type
+`signups` to approve or reject them.
+
 Approval model (Seçenek 2):
 - A 'user' write request is queued (persistent) and the turn ends.
 - An 'admin' write request gets inline approve/reject (admin is the approver).
@@ -7,6 +13,7 @@ Approval model (Seçenek 2):
 - Anyone types `my requests` to see their own requests (pending/approved/denied).
 """
 
+import asyncio
 import json
 import os
 
@@ -26,6 +33,7 @@ LangChainInstrumentor().instrument(tracer_provider=_tracer_provider)
 
 import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+from chainlit.server import app as chainlit_server
 
 from orchestrator.supervisor import prepare as prepare_request
 from orchestrator.supervisor import execute_create
@@ -35,16 +43,23 @@ from orchestrator.chat_memory import (
     reconstruct_chat_history,
 )
 from orchestrator.mcp_runtime import get_runtime_manager
-from users import verify_user, get_admin_emails
 from mailer import send_email
 import approvals
+import signup
+import tokens
+import users
+
+users.init()
+signup.register(chainlit_server)
 
 _MESSAGE_TYPES = {"user_message", "assistant_message"}
 
 # Commands (case-insensitive)
 _ADMIN_QUEUE_CMDS = {"approvals", "pending", "queue", "bekleyenler", "onaylar"}
 _MY_REQUESTS_CMDS = {"my requests", "my approvals", "requests", "taleplerim", "isteklerim"}
-_MEMORY_EXCLUDED_COMMANDS = _ADMIN_QUEUE_CMDS | _MY_REQUESTS_CMDS
+_SIGNUP_CMDS = {"signups", "signup requests", "kayıtlar", "kayit talepleri", "kayıt talepleri"}
+_USERS_CMDS = {"users", "kullanıcılar", "kullanicilar"}
+_MEMORY_EXCLUDED_COMMANDS = _ADMIN_QUEUE_CMDS | _MY_REQUESTS_CMDS | _SIGNUP_CMDS | _USERS_CMDS
 _CHAT_HISTORY_KEY = "chat_history"
 
 class RootMessageDataLayer(SQLAlchemyDataLayer):
@@ -66,13 +81,12 @@ def get_data_layer():
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
-    user = verify_user(username, password)
+    # Only active users with a correct password get in. The app JWT is the
+    # single carrier of role/team/e-mail; nothing else is trusted from metadata.
+    user = users.verify_user(username, password)
     if user is None:
         return None
-    return cl.User(
-        identifier=username,
-        metadata={"role": user["role"], "email": user.get("email", ""), "team": user.get("team", "")},
-    )
+    return cl.User(identifier=user["username"], metadata={"token": tokens.issue_token(user)})
 
 # NOTE: MCP server connection config now lives in orchestrator/mcp_runtime.py
 # (single source of truth). The chat profile only selects which fabric dict to
@@ -143,23 +157,53 @@ async def chat_profiles(current_user=None):
         profiles.append(cl.ChatProfile(**kwargs))
     return profiles
 
+def _session():
+    """Verify the current user's app JWT and return its claims, or None.
+
+    Called on chat start and again on every message/action, so an expired
+    token, a disabled user or a changed role/team/password (token_version)
+    takes effect immediately. The verified claims are mirrored into the
+    Chainlit user_session for the rest of the turn.
+    """
+    app_user = cl.user_session.get("user")
+    token = (app_user.metadata or {}).get("token") if app_user else None
+    try:
+        claims = tokens.verify_token(token)
+    except tokens.InvalidSession as e:
+        cl.user_session.set("session_error", str(e))
+        cl.user_session.set("role", "none")
+        return None
+    cl.user_session.set("session_error", None)
+    cl.user_session.set("username", claims["username"])
+    cl.user_session.set("role", claims["role"])
+    cl.user_session.set("team", claims["team"])
+    cl.user_session.set("email", claims["email"])
+    return claims
+
+async def _require_session(admin=False):
+    """Verified claims, or None after telling the user why."""
+    claims = _session()
+    if claims is None:
+        reason = cl.user_session.get("session_error") or "invalid session"
+        await cl.Message(
+            content=f"🔒 Your session is not valid ({reason}). Please log out and log in again."
+        ).send()
+        return None
+    if admin and claims["role"] != "admin":
+        await cl.Message(content="Only admins can do this.").send()
+        return None
+    return claims
+
 def _setup_session():
     profile_name = cl.user_session.get("chat_profile")
     fabric = _fabric_by_name(profile_name) if profile_name else _all_fabrics()[0]
     cl.user_session.set("fabric", fabric)
     app_user = cl.user_session.get("user")
-    role = "user"
-    team = ""
-    if app_user and app_user.metadata:
-        role = app_user.metadata.get("role", "user")
-        team = app_user.metadata.get("team", "")
-    cl.user_session.set("role", role)
-    cl.user_session.set("team", team)
-    return app_user, role
+    claims = _session()
+    return app_user, (claims["role"] if claims else "none")
 
 def _username():
-    app_user = cl.user_session.get("user")
-    return app_user.identifier if app_user else "?"
+    return cl.user_session.get("username") or "?"
 
 def _chat_history():
     return normalize_chat_history(cl.user_session.get(_CHAT_HISTORY_KEY) or [])
@@ -175,6 +219,9 @@ async def on_chat_start():
     await approvals.init()
     cl.user_session.set(_CHAT_HISTORY_KEY, [])
     app_user, role = _setup_session()
+    if role == "none":
+        await _require_session()
+        return
     # Lazy-but-warm: pre-spawn this fabric's persistent MCP servers now so the
     # first message doesn't pay the startup cost. Best-effort — a failure here
     # (e.g. an unreachable APIC) is logged inside warm() and surfaces as a clear
@@ -184,7 +231,7 @@ async def on_chat_start():
     fabric = cl.user_session.get("fabric") or {}
     if fabric:
         await get_runtime_manager().warm(fabric)
-    username = app_user.identifier if app_user else "?"
+    username = _username()
     team = cl.user_session.get("team", "")
     role_label = "Admin" if role == "admin" else "User"
     team_label = f" — Team: {team}" if team else ""
@@ -192,7 +239,8 @@ async def on_chat_start():
 
     extra = ""
     if role == "admin":
-        extra = "\n- Type `approvals` to review pending requests from users"
+        extra = ("\n- Type `approvals` to review pending requests from users"
+                 "\n- Type `signups` to approve or reject new accounts, `users` to list accounts")
 
     await cl.Message(content=(
         f"**ACI Agent ready.** (Logged in: {username} — {role_label}{team_label}{fabric_label})\n\n"
@@ -281,11 +329,24 @@ _STATUS_ICON = {"pending": "⏳", "approved": "✅", "denied": "❌"}
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    claims = await _require_session()
+    if claims is None:
+        return
     fabric = cl.user_session.get("fabric")
-    role = cl.user_session.get("role", "user")
-    username = _username()
+    role = claims["role"]
+    username = claims["username"]
     text = (message.content or "").strip()
     low = text.lower()
+
+    # ---- Commands: account administration (admin) ----
+    if low in _SIGNUP_CMDS or low in _USERS_CMDS:
+        if role != "admin":
+            await cl.Message(content="Only admins can manage accounts.").send()
+        elif low in _SIGNUP_CMDS:
+            await show_pending_signups()
+        else:
+            await show_users()
+        return
 
     # ---- Commands: approval queue ----
     if low in _ADMIN_QUEUE_CMDS:
@@ -302,7 +363,7 @@ async def on_message(message: cl.Message):
         return
 
     # ---- Normal request handling ----
-    team = cl.user_session.get("team", "")
+    team = claims["team"]
     profile = cl.user_session.get("chat_profile") or ""
     try:
         state = await prepare_request(
@@ -368,8 +429,7 @@ async def on_message(message: cl.Message):
         else:
             # User → queue it persistently, end the turn
             summary = f"{state.get('target_class')} @ {dn}"
-            app_user = cl.user_session.get("user")
-            requester_email = (app_user.metadata or {}).get("email", "") if app_user else ""
+            requester_email = claims["email"]
             fabric = cl.user_session.get("fabric", {})
             fabric_name = fabric.get("name", " ")
             aid = await approvals.create(
@@ -381,7 +441,7 @@ async def on_message(message: cl.Message):
                 _curate_plan(state),
                 fabric_name,
             )
-            admin_emails = get_admin_emails()
+            admin_emails = users.get_admin_emails()
 
             
             if admin_emails:
@@ -493,9 +553,7 @@ async def show_my_requests(username):
 
 @cl.action_callback("approve_request")
 async def on_approve_request(action: cl.Action):
-    role = cl.user_session.get("role", "user")
-    if role != "admin":
-        await cl.Message(content="Only admins can approve requests.").send()
+    if await _require_session(admin=True) is None:
         return
     approval_id = action.payload.get("id")
     appr = await approvals.get(approval_id)
@@ -554,9 +612,7 @@ async def on_approve_request(action: cl.Action):
 
 @cl.action_callback("deny_request")
 async def on_deny_request(action: cl.Action):
-    role = cl.user_session.get("role", "user")
-    if role != "admin":
-        await cl.Message(content="Only admins can deny requests.").send()
+    if await _require_session(admin=True) is None:
         return
     approval_id = action.payload.get("id")
     appr = await approvals.get(approval_id)
@@ -607,3 +663,71 @@ async def render_create_result(state):
             step.output = trail_text
     return body
 
+
+# ============================================================
+# Account administration: signup approvals (admin)
+# ============================================================
+
+async def show_pending_signups():
+    pending = await asyncio.to_thread(users.list_users, "pending")
+    if not pending:
+        await cl.Message(content="✅ No pending signup requests.").send()
+        return
+    await cl.Message(content=f"**{len(pending)} pending signup request(s):**").send()
+    for u in pending:
+        body = (
+            f"**{u['username']}**\n"
+            f"- E-mail: {u['email'] or '-'}\n"
+            f"- Team: `{u['team'] or '-'}`\n"
+            f"- Requested: {u['created_at'][:16].replace('T', ' ')} UTC"
+        )
+        actions = [
+            cl.Action(name="approve_signup", payload={"username": u["username"], "role": "user"},
+                      label="✅ Approve"),
+            cl.Action(name="approve_signup", payload={"username": u["username"], "role": "admin"},
+                      label="🛡️ Approve as admin"),
+            cl.Action(name="reject_signup", payload={"username": u["username"]}, label="❌ Reject"),
+        ]
+        await cl.Message(content=body, actions=actions).send()
+
+async def show_users():
+    rows = await asyncio.to_thread(users.list_users)
+    lines = [f"**Accounts ({len(rows)}):**\n",
+             "| User | Role | Team | Status | Last login |", "|---|---|---|---|---|"]
+    for u in rows:
+        last = (u.get("last_login") or "-")[:16].replace("T", " ")
+        lines.append(f"| {u['username']} | {u['role']} | {u['team'] or '-'} | {u['status']} | {last} |")
+    lines.append("\nRole/team/status changes and password resets: `python manage_users.py --help` on the server.")
+    await cl.Message(content="\n".join(lines)).send()
+
+async def _decide_signup(action: cl.Action, approve: bool):
+    claims = await _require_session(admin=True)
+    if claims is None:
+        return
+    username = action.payload.get("username", "")
+    role = action.payload.get("role", "user") if approve else "user"
+    user, err = await asyncio.to_thread(users.decide_signup, username, approve, claims["username"], role)
+    if err:
+        await cl.Message(content=f"⚠️ {err}").send()
+        return
+    if approve:
+        await cl.Message(content=f"✅ `{username}` approved as **{user['role']}** "
+                                 f"(team `{user['team']}`) by `{claims['username']}`.").send()
+        subject = "[NetworkGPT] Your account has been approved"
+        text = (f"Hello {username},\n\nYour NetworkGPT account was approved by {claims['username']}.\n"
+                f"Role: {user['role']}\nTeam: {user['team']}\n\nYou can log in now.")
+    else:
+        await cl.Message(content=f"❌ Signup of `{username}` rejected by `{claims['username']}`.").send()
+        subject = "[NetworkGPT] Your account request was rejected"
+        text = (f"Hello {username},\n\nYour NetworkGPT account request was rejected by "
+                f"{claims['username']}.\nPlease contact the network admin team if you have questions.")
+    if user.get("email"):
+        await send_email(user["email"], subject, text)
+
+@cl.action_callback("approve_signup")
+async def on_approve_signup(action: cl.Action):
+    await _decide_signup(action, approve=True)
+
+@cl.action_callback("reject_signup")
+async def on_reject_signup(action: cl.Action):
+    await _decide_signup(action, approve=False)

@@ -11,7 +11,7 @@ from email.message import EmailMessage
 def _send_sync(to_addrs, subject, body):
     host = os.environ.get("SMTP_HOST")
     if not host:
-        logging.warning()
+        logging.warning("SMTP_HOST not set; skipping email: %s", subject)
         return False
     
     if isinstance(to_addrs, str):
@@ -22,8 +22,9 @@ def _send_sync(to_addrs, subject, body):
         logging.warning("NO recipients! skipping %s", subject)
         return False
     
-    port = int(os.environ.get("SMPT_PORT", "25"))
-    security = (os.environ.get("SMPT_SECURITY", "none") or "none").lower()
+    # SMTP_* names; the older SMPT_* spellings are still honoured.
+    port = int(os.environ.get("SMTP_PORT") or os.environ.get("SMPT_PORT") or "25")
+    security = (os.environ.get("SMTP_SECURITY") or os.environ.get("SMPT_SECURITY") or "none").lower()
     user = os.environ.get("SMTP_USER") or None
     password = os.environ.get("SMTP_PASSWORD") or None
     sender = os.environ.get("SMTP_FROM") or "networkgpt@ziraatteknoloji.com"
