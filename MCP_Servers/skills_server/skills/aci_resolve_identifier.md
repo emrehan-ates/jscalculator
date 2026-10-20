@@ -62,10 +62,10 @@ Result: every (node × port) with profile, selector, PG, type (access/PC/vPC)
 and data/management label. Typical dual-homed host: 2 data + 2 management
 ports across 2 leaves; a PC may sit on one leaf — report what APIC returns.
 
-## Management ports — ESXI-Infra-<leaf> profiles
+## Management ports — ESXI-Infra-<leaf> / ESX-Infra-<leaf> profiles
 
 Management ports are NOT in the host's own profile. Each leaf N has a shared
-interface profile `ESXI-Infra-N` (any `-`/`_` mix) with team selectors such as
+interface profile `ESXI-Infra-N` or `ESX-Infra-N` (any `-`/`_` mix) with team selectors such as
 `ESXI-Infra-MSY-N`; the port block whose **description** names the host is
 its management port (see **aci_naming_conventions**).
 
@@ -78,10 +78,10 @@ Manual steps (same logic):
 M1. Leaves to check: the host's data leaves (B1–B4), or the leaves the user
 named. A host on 109 + 110 → check both.
 
-M2. Per leaf, ONE query covers all 4 spellings:
-`/api/node/class/infraAccPortP.json?query-target-filter=or(eq(infraAccPortP.name,"ESXI-Infra-110"),eq(infraAccPortP.name,"ESXI_Infra_110"),eq(infraAccPortP.name,"ESXI-Infra_110"),eq(infraAccPortP.name,"ESXI_Infra-110"))`
+M2. Per leaf, ONE query covers all 8 spellings (ESXI or ESX × `-`/`_`):
+`/api/node/class/infraAccPortP.json?query-target-filter=or(eq(infraAccPortP.name,"ESXI-Infra-110"),eq(infraAccPortP.name,"ESXI_Infra_110"),eq(infraAccPortP.name,"ESXI-Infra_110"),eq(infraAccPortP.name,"ESXI_Infra-110"),eq(infraAccPortP.name,"ESX-Infra-110"),eq(infraAccPortP.name,"ESX_Infra_110"),eq(infraAccPortP.name,"ESX-Infra_110"),eq(infraAccPortP.name,"ESX_Infra-110"))`
 0 results → `or(wcard(infraAccPortP.name,"nfra-110"),wcard(infraAccPortP.name,"nfra_110"))`
-and keep only names of the form ESXI?Infra?110.
+and keep only names of the form ESX(I)?Infra?110.
 
 M3. Read it: `/api/node/mo/uni/infra/accportprof-<NAME>.json?rsp-subtree=full`.
 Under each `infraHPortS` (e.g. `ESXI-Infra-MSY-110`) check every
@@ -91,7 +91,7 @@ is the management port on leaf 110.
 
 M4. Leaf not known at all: one query
 `/api/node/class/infraPortBlk.json?query-target-filter=wcard(infraPortBlk.descr,"<SERIAL>")`
-and keep blocks whose dn is under an `accportprof-ESXI?Infra?N` profile.
+and keep blocks whose dn is under an `accportprof-ESX(I)?Infra?N` profile.
 
 Report per leaf: management port, profile, selector, description. A leaf
 whose ESXI-Infra profile has no matching description is reported as

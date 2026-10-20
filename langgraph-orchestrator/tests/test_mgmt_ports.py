@@ -94,9 +94,20 @@ def run(coro):
 
 
 class MgmtPortTests(unittest.TestCase):
-    def test_four_spellings(self):
+    def test_eight_spellings(self):
         self.assertEqual(mgmt_ports.infra_profile_names("110"), [
-            "ESXI-Infra-110", "ESXI-Infra_110", "ESXI_Infra-110", "ESXI_Infra_110"])
+            "ESXI-Infra-110", "ESXI-Infra_110", "ESXI_Infra-110", "ESXI_Infra_110",
+            "ESX-Infra-110", "ESX-Infra_110", "ESX_Infra-110", "ESX_Infra_110"])
+
+    def test_esx_prefix_profile_is_found(self):
+        prof = PROFILES.pop("ESXI_Infra-110")
+        PROFILES["ESX_Infra-110"] = prof
+        try:
+            res = run(mgmt_ports.resolve_management_ports("MSY_CX1"))
+        finally:
+            PROFILES["ESXI_Infra-110"] = PROFILES.pop("ESX_Infra-110")
+        self.assertIn("topology/pod-1/paths-110/pathep-[eth1/30]", res["tdns"])
+        self.assertIn("ESX_Infra-110", res["profiles_checked"])
 
     def test_host_on_two_leaves_checks_both_infra_profiles(self):
         res = run(mgmt_ports.resolve_management_ports("MSY_CX1"))

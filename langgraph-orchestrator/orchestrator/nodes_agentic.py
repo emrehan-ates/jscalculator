@@ -97,7 +97,8 @@ MANAGEMENT PORTS OF A HOST (important)
 - When the user asks for a host's management / mgmt / yönetim ports (or "all
   ports" incl. management), call find_management_ports(host=<serial or name>)
   FIRST — optionally with nodes=[leaf IDs] if the user named the leaves. It
-  searches the ESXI-Infra-<leaf> interface profiles (all "-"/"_" spellings) on
+  searches the ESXI-Infra-<leaf> / ESX-Infra-<leaf> interface profiles (all
+  8 prefix and "-"/"_" spellings) on
   every leaf the host is attached to and returns the port blocks whose
   description names the host. Management ports are NOT in the host's own
   MSY_/CSY_<SERIAL> profile. Manual procedure: skill aci_resolve_identifier,

@@ -13,3 +13,4 @@
 {"input": "son yapılan konfigürasyon değişikliklerini göster", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
 {"input": "leaf switch'lerin firmware sürümlerini listele", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic"}}
 {"input": "explain how I would troubleshoot an L3Out that is not advertising routes", "expected": {"route": "agentic"}, "metadata": {"category": "routing_agentic", "judge": true}}
+{"input": "EVAL_SRV_A ve EVAL_SRV_B sunucularini DVS'ten cikar", "expected": {"route": "create", "intent": "remove_from_dvs"}, "metadata": {"category": "routing_create"}}

@@ -708,8 +708,8 @@ Kopyalama additive merge'dir; hedefteki mevcut binding'leri silmez.
 ### Management portlari (create + agentic)
 
 Host'un management portlari kendi `<TEAM>_<SERIAL>` profilinde degil, her
-leaf'teki ortak `ESXI-Infra-<leaf>` interface profilindedir (`-`/`_` 4
-kombinasyon). Icindeki selector'lerde (`ESXI-Infra-MSY-<leaf>` vb.) port
+leaf'teki ortak `ESXI-Infra-<leaf>` veya `ESX-Infra-<leaf>` interface
+profilindedir (2 prefix x `-`/`_` 4 kombinasyon = 8 yazim). Icindeki selector'lerde (`ESXI-Infra-MSY-<leaf>` vb.) port
 block description'i host'u iceren blok management portudur.
 `orchestrator/mgmt_ports.py::resolve_management_ports()`:
 
@@ -725,6 +725,22 @@ Create flow'larda `{"serial": ..., "scope": "management" | "all"}` port
 referansi `resolve_port_ref()` uzerinden bu cozumleyiciyi kullanir
 (`bind_epg`, `bind_vmm_domain`, `copy_epg_bindings` kaynak/hedef). Agentic
 flow'da ayni mantik `find_management_ports` tool'u olarak kayitlidir.
+
+### Sunuculari DVS'ten cikarma (`remove_from_dvs`)
+
+"Su sunuculari DVS'ten cikar" -> `orchestrator/dvs_removal.py::build_remove_from_dvs()`:
+
+1. Her sunucu icin adinda serial gecen DATA interface profile'lari bulunur
+   (ESX(I)-Infra management profilleri asla degistirilmez).
+2. Selector'lerin policy group'lari (`infraRsAccBaseGrp.tDn`) toplanir.
+3. Takim = kullanicinin takimi, yoksa profil prefix'i (MSY_/CSY_).
+4. `infraAttEntityP` GET edilir ve `<TAKIM>_baremetal` her buyuk/kucuk harf ve
+   ayirici (`MSY_Baremetal`, `MSY_BAREMETAL`, `MSY-Bare_Metal`) icin aranir;
+   APIC'teki gercek isim kullanilir. Birden fazla eslesirse islem durur.
+5. Baska sunucularin profilleri tarafindan da kullanilan policy group atlanir
+   (`skipped`), zaten baremetal'de olanlar `already_baremetal` olarak listelenir.
+6. Kalan policy group'larin `infraRsAttEntP.tDn`'i tek atomik `polUni` POST'u
+   ile baremetal AEP'ye cevrilir (onay kapili).
 
 ## 12. Switch Adi Cozme Detayi
 

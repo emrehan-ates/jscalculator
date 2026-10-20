@@ -2,7 +2,8 @@
 
 Site convention: a host's MANAGEMENT ports are not in the host's own
 interface profile. Every leaf has a shared infra interface profile named
-ESXI-Infra-<NODE> ("-" or "_" between the parts, so 4 spellings), holding
+ESXI-Infra-<NODE> or ESX-Infra-<NODE> ("-" or "_" between the parts, so 8
+spellings in total), holding
 team selectors such as ESXI-Infra-MSY-<NODE> / ESXI-Infra-CSY-<NODE>. The
 port block (infraPortBlk) whose DESCRIPTION names the host is that host's
 management port.
@@ -10,7 +11,7 @@ management port.
 Resolution:
   1. leaves to check = nodes given by the caller, else the leaves of the
      host's data interface profile(s) (e.g. a host on 109+110 checks both);
-  2. per leaf: find ESXI-Infra-<NODE> trying all 4 "-"/"_" spellings in ONE
+  2. per leaf: find ESX(I)-Infra-<NODE> trying all 8 spellings in ONE
      query (case-insensitive fallback in a second query);
   3. read the profile subtree, keep every port block whose descr contains the
      host token -> leaf N (from the profile name) + eth port = management port.
@@ -25,17 +26,19 @@ import re
 
 from langchain_core.tools import tool
 
-INFRA_PREFIX = "ESXI"
+INFRA_PREFIXES = ("ESXI", "ESX")
 INFRA_WORD = "Infra"
 _TEAM_PREFIX_RE = re.compile(r"^(?:MSY|CSY|SG)[_-]", re.I)
 _DATA_SUFFIX_RE = re.compile(r"[_-]DATA$", re.I)
-_INFRA_NAME_RE = re.compile(r"^esxi[-_]infra[-_]0*(\d+)$", re.I)
+_INFRA_NAME_RE = re.compile(r"^esxi?[-_]infra[-_]0*(\d+)$", re.I)
 
 
 def infra_profile_names(node):
-    """All 4 spellings of the infra interface profile for a leaf."""
+    """All 8 spellings of the infra interface profile for a leaf: ESXI or ESX
+    prefix, each with any mix of '-'/'_'."""
     n = str(node).strip()
-    return [f"{INFRA_PREFIX}{a}{INFRA_WORD}{b}{n}" for a in "-_" for b in "-_"]
+    return [f"{p}{a}{INFRA_WORD}{b}{n}"
+            for p in INFRA_PREFIXES for a in "-_" for b in "-_"]
 
 
 def host_tokens(host):
@@ -77,14 +80,15 @@ def _attrs(item, cls):
 
 
 async def find_infra_profiles(node):
-    """Return [{"name","dn"}] of the ESXI-Infra-<node> interface profile(s)."""
+    """Return [{"name","dn"}] of the ESXI-Infra-<node> / ESX-Infra-<node>
+    interface profile(s)."""
     names = infra_profile_names(node)
     flt = "or(" + ",".join(f'eq(infraAccPortP.name,"{n}")' for n in names) + ")"
     found = [_attrs(i, "infraAccPortP") for i in await _get(
         "/api/node/class/infraAccPortP.json", {"query-target-filter": flt})]
     if not found:
         # Case / zero-padding differences: substring on "nfra" + node, then
-        # keep only names that really are ESXI-Infra-<node>.
+        # keep only names that really are ESX(I)-Infra-<node>.
         n = str(node).strip()
         terms = [f'wcard(infraAccPortP.name,"{w}{s}{n}")'
                  for w in ("nfra", "NFRA") for s in "-_"]
@@ -265,8 +269,8 @@ async def resolve_management_ports(host, nodes=None):
 @tool
 async def find_management_ports(host: str, nodes: list[str] | None = None) -> str:
     """Find a server/ESXi host's MANAGEMENT ports. Site convention: management
-    ports live in the shared leaf interface profile ESXI-Infra-<leaf> (any mix
-    of '-'/'_'), under selectors like ESXI-Infra-MSY-<leaf>; the port block
+    ports live in the shared leaf interface profile ESXI-Infra-<leaf> or
+    ESX-Infra-<leaf> (any mix of '-'/'_'), under selectors like ESXI-Infra-MSY-<leaf>; the port block
     whose description names the host is its management port. Pass the host
     serial or name (e.g. 'CX124553KT' or 'MSY_CX124553KT'); optionally the leaf
     IDs to check (default: the leaves of the host's data ports). Returns leaf +

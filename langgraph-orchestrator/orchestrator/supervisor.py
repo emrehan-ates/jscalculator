@@ -13,6 +13,7 @@ from .graph_create import build_create_graph, build_prepare_graph, build_execute
 from .graph_agentic import build_agentic_graph
 from .agentic_aci_kb import aci_lookup_class
 from .mgmt_ports import find_management_ports
+from .dvs_removal import build_remove_from_dvs
 from .chat_memory import normalize_chat_history
 from .mcp_runtime import get_runtime_manager
 from .nodes_agentic import MAX_AGENT_ITERATIONS
@@ -565,6 +566,11 @@ async def run(user_input, fabric, team="", profile="", chat_history=None):
             if prep.get("errors"):
                 return prep
             return await build_execute_graph().ainvoke(prep)
+        if intent == "remove_from_dvs":
+            prep = await build_remove_from_dvs(params, user_input, team=team)
+            if prep.get("errors"):
+                return prep
+            return await build_execute_graph().ainvoke(prep)
         return await build_create_graph().ainvoke(initial)
     else:
         # Everything that is not a deterministic create is handled agentically.
@@ -597,6 +603,8 @@ async def prepare(user_input, fabric, team="", profile="", chat_history=None):
             return await _build_copy_port(params, user_input, team=team, convention=convention)
         if intent == "copy_epg_bindings":
             return await _build_copy_bindings(params, user_input, convention=convention)
+        if intent == "remove_from_dvs":
+            return await build_remove_from_dvs(params, user_input, team=team)
         result = await build_prepare_graph().ainvoke(initial)
         result["flow"] = "create"
         return result

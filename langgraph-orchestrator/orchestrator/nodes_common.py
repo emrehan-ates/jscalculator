@@ -186,6 +186,10 @@ DETERMINISTIC CREATE (POST) — write operations, approval-gated:
   storm/STP/LACP) from an EXISTING port, onto a NEW leaf+port the user gives.
   The new name (TEAM_SERIAL) is applied to the policy group, interface profile,
   selector, and all descriptions.
+- remove_from_dvs — take one or more servers OUT OF the DVS / VMM ("şu
+  sunucuları DVS'ten çıkar", "remove X and Y from the DVS", "baremetal'e al"):
+  their data policy groups are moved to the team's baremetal AEP. The AEP is
+  found automatically; the user only names the servers.
 
 AGENTIC (investigation, reads, lookups — everything that is not a create):
 - Listing / showing / counting / getting objects by type ("list VRFs",
@@ -234,6 +238,7 @@ Respond ONLY with a JSON object. Examples:
 {"intent":"copy_epg_bindings","flow":"create","params":{"source":{"serial":"MSY_CX124553KT"},"destinations":[{"serial":"CX2204300RT"},{"serial":"CZ24160G9N"},{"node":"101","port":"eth1/5"}]},"target_class":"fvRsPathAtt"}
 {"intent": "bind_epg", "flow": "create", "params": {"epgs": ["ESX_MGMT_110"], "mode": "trunk", "bindings": [{"serial": "CX124553KT", "scope": "management"}]}, "target_class": "fvRsPathAtt"}
 {"intent":"copy_epg_bindings","flow":"create","params":{"source":{"serial":"CX124553KT","scope":"management"},"destinations":[{"serial":"CZ24160G9N","scope":"management"},{"serial":"CX2204300RT","scope":"management"}]},"target_class":"fvRsPathAtt"}
+{"intent":"remove_from_dvs","flow":"create","params":{"servers":[{"serial":"CX124553KT"},{"serial":"MSY_CZ24160G9N"}]},"target_class":"infraRsAttEntP"}
 {"intent":"copy_port_definition","flow":"create","params":{"name":"CZ241809QS","source":"CZ241908H2","nodes":["125"],"ports":["eth1/47"]},"target_class":"infraAccPortGrp"}
 {"intent": "agentic", "flow": "agentic", "params": {}, "target_class": ""}
 
@@ -258,7 +263,7 @@ PARAM RULES:
         "scope": "all"        -> data AND management ports ("tüm portları",
                                  "data ve management"),
         omit scope            -> the data ports (default).
-      Management ports are found automatically in the ESXI-Infra-<leaf>
+      Management ports are found automatically in the ESX(I)-Infra-<leaf>
       profiles; NEVER invent management leaf/port values.
     * {"node": "<leaf id>", "port": "eth1/x"} — an explicit single leaf port.
       The "node" value may be a switch hostname (e.g. "DR1-C6-8") instead of a
@@ -307,6 +312,10 @@ PARAM RULES:
   and "ports" (LIST like ["eth1/47"]). Do NOT extract port_type, aep, or any
   policy: they are copied verbatim from the source. NEVER invent the source,
   nodes, or ports.
+- remove_from_dvs: extract "servers" (LIST of {"serial": "<serial or full
+  interface-profile name>"}, one per server the user names — keep any MSY_/
+  CSY_ prefix). Do NOT extract the AEP or team; the baremetal AEP of the
+  user's team is looked up automatically. NEVER invent a server.
 - agentic: leave "params" empty ({}). The agent extracts what it needs itself.
 
 Class mapping (CREATE only):
@@ -317,9 +326,10 @@ Class mapping (CREATE only):
 - define_port -> infraAccPortGrp (access) or infraAccBndlGrp (pc/vpc)
 - copy_epg_bindings -> fvRsPathAtt
 - copy_port_definition -> infraAccPortGrp (access) or infraAccBndlGrp (pc/vpc)
+- remove_from_dvs -> infraRsAttEntP
 - agentic -> (no class)
 
-flow is "create" for create_*/bind_epg/bind_vmm_domain/define_port/copy_epg_bindings/copy_port_definition,
+flow is "create" for create_*/bind_epg/bind_vmm_domain/define_port/copy_epg_bindings/copy_port_definition/remove_from_dvs,
 "agentic" for everything else.
 """
 
