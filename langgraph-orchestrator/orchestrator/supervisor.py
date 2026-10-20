@@ -9,7 +9,10 @@ import re
 
 from .nodes_common import (recognize_intent, set_tools, interpret_operation,
                            resolve_node_name, detect_switch_convention)
-from .graph_create import build_create_graph, build_prepare_graph, build_execute_graph
+import copy
+
+from .graph_create import (build_create_graph, build_prepare_graph, build_execute_graph,
+                           build_prepare_from_intent_graph)
 from .graph_agentic import build_agentic_graph
 from .agentic_aci_kb import aci_lookup_class
 from .mgmt_ports import find_management_ports
@@ -301,6 +304,9 @@ async def _build_port(params, user_input, team="", convention=None):
 
     prep = build_port_definition(params, user_input, sw_name)
     prep["trail"] = trail + prep.get("trail", [])
+    if not prep.get("errors"):
+        prep["planned_port"] = {"name": params["name"], "type": ptype, "nodes": nodes,
+                                "ports": params.get("ports") or []}
     return prep
 
 async def _build_copy_port(params, user_input, team="", convention=None):
@@ -389,6 +395,8 @@ async def _build_copy_port(params, user_input, team="", convention=None):
     prep = build_port_definition(bp_params, user_input, sw_name)
     prep["intent"] = intent
     prep["trail"] = trail + prep.get("trail", [])
+    if not prep.get("errors"):
+        prep["planned_port"] = {"name": name, "type": ptype, "nodes": nodes, "ports": ports}
     return prep
 
 def _copy_destinations(params):
@@ -580,6 +588,62 @@ async def run(user_input, fabric, team="", profile="", chat_history=None):
             config={"recursion_limit": AGENTIC_RECURSION_LIMIT},
         )
 
+async def prepare_create_task(task, user_input, team="", convention=None):
+    """Prepare ONE already-classified create task of a multi-task request.
+    Returns the same prepared-state shape as prepare() does for a create."""
+    intent = task.get("intent", "")
+    params = copy.deepcopy(task.get("params") or {})  # builders mutate refs
+    if intent == "bind_epg":
+        return await _build_binding(params, user_input)
+    if intent == "bind_vmm_domain":
+        return await _build_vmm_binding(params, user_input)
+    if intent == "define_port":
+        return await _build_port(params, user_input, team=team, convention=convention)
+    if intent == "copy_port_definition":
+        return await _build_copy_port(params, user_input, team=team, convention=convention)
+    if intent == "copy_epg_bindings":
+        return await _build_copy_bindings(params, user_input, convention=convention)
+    if intent == "remove_from_dvs":
+        return await build_remove_from_dvs(params, user_input, team=team)
+    state = _new_state(user_input)
+    state.update({"intent": intent, "flow": "create", "params": params,
+                  "target_class": task.get("target_class", "")})
+    result = await build_prepare_from_intent_graph().ainvoke(state)
+    result["flow"] = "create"
+    result["intent"] = intent
+    if not result.get("errors") and not result.get("dn"):
+        result["errors"] = [f"could not build a valid {task.get('target_class') or intent} payload"]
+    return result
+
+
+async def decompose(user_input, fabric, team="", profile="", chat_history=None):
+    """Split a request into ordered atomic tasks (see batch.py)."""
+    from .batch import decompose_request
+    await _load_tools(fabric)
+    return await decompose_request(
+        user_input, chat_history=normalize_chat_history(chat_history),
+        convention=detect_switch_convention(profile))
+
+
+async def run_agentic_task(question, fabric, chat_history=None):
+    """Answer ONE read/troubleshooting question with its own agent run."""
+    await _load_tools(fabric)
+    initial = _new_state(question, chat_history)
+    initial.update({"intent": "agentic", "flow": "agentic", "params": {}, "target_class": ""})
+    result = await build_agentic_graph().ainvoke(
+        initial, config={"recursion_limit": AGENTIC_RECURSION_LIMIT})
+    result["flow"] = "agentic"
+    return result
+
+
+async def prepare_creates(tasks, user_input, fabric, team="", profile=""):
+    """Prepare every create task of a request into one approval plan."""
+    from .batch import prepare_create_batch
+    await _load_tools(fabric)
+    return await prepare_create_batch(tasks, user_input, team=team,
+                                      convention=detect_switch_convention(profile))
+
+
 #this welcones the prompt and route according to intent
 async def prepare(user_input, fabric, team="", profile="", chat_history=None):
     await _load_tools(fabric)
@@ -635,6 +699,11 @@ def _summarize_create_result(state) -> str:
 
 async def execute_create(state, fabric):
     await _load_tools(fabric)
+    if state.get("intent") == "batch":
+        from .batch import execute_batch
+        result = await execute_batch(state)
+        result["interpretation"] = result.get("batch_summary", "")
+        return result
     result = await build_execute_graph().ainvoke(state)
     try:
         summary = _summarize_create_result(result)

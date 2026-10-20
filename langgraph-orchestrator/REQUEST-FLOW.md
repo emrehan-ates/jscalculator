@@ -1056,6 +1056,37 @@ Request B / Fabric 2
 Shared ACI KB/Skills session'lari aynidir; APIC session'lari farklidir. Registry
 global olarak pool edilmedigi ve ContextVar request-local oldugu icin Fabric 1'in
 `apic_get` tool'u Fabric 2 istegine sizmaz.
+## Cok Gorevli Istekler (`orchestrator/batch.py`)
+
+Bir mesaj birden fazla create ve/veya soru icerebilir. `chainlit_app.on_message`:
+
+1. **Ayristirma** — `decompose_request()` tek LLM cagrisiyla mesaji sirali,
+   atomik gorevlere boler: `{id, intent, flow, params, summary, depends_on,
+   question?}`. Liste alan tek islemler (cok EPG/port'lu `bind_epg`, cok
+   hedefli `copy_epg_bindings`, cok sunuculu `remove_from_dvs`) tek gorevdir.
+   Birbirine bagli sorular tek agentic gorevde tutulur. En fazla 20 gorev.
+   Ciplak "evet yap" turu yine yazma baslatamaz.
+2. **Gorev listesi onayi** — listede en az bir create varsa kullaniciya
+   "Sunlari anladim" listesi Continue/Cancel ile gosterilir.
+3. **Agentic gorevler** — sirayla, her biri kendi agent calismasinda
+   cevaplanir; cevaplar numarali bolumler halinde gonderilir.
+4. **Create hazirligi** — `prepare_create_batch()` create'leri sirayla hazirlar.
+   Tek bir gorev bile hazirlanamazsa hicbir sey onaya gitmez.
+   - Bilinen bagimliliklar ayni POST'ta cozulur: bu istekte tanimlanan port
+     (`define_port` / `copy_port_definition`) -> `bind_epg` /
+     `bind_vmm_domain` / `copy_epg_bindings` (port path'i plandan hesaplanir,
+     `nodes_port.set_planned_ports`), `create_tenant` -> `create_bd`.
+   - Diger bagimliliklar sonraki **asamaya** alinir; o asama onceki asama
+     uygulandiktan sonra canli APIC verisiyle hazirlanir.
+5. **Onay ve uygulama** — tum asama-1 create'leri tek `polUni` agacinda
+   birlestirilir (`merge_preps`) ve tek POST ile uygulanir (APIC tek POST'u
+   hep-ya-hic uygular). Sonraki asamalar sirayla hazirlanip POST edilir; bir
+   asama hazirlanamaz ya da APIC reddederse durulur, hangi asamalarin
+   uygulandigi raporlanir (`execute_batch`). Admin onayi / kullanici kuyrugu
+   ayni kalir; kuyruktaki kayit tum partiyi tasir (`plan.batch`).
+
+Tek create'lik istek bugunku plan gorunumuyle ayni sekilde onaya gider.
+
 ## Kimlik Dogrulama ve Kayit
 
 - **Kullanici deposu** (`users.py`): SQLite (`USERS_DB`), sifreler bcrypt hash.

@@ -402,8 +402,8 @@ def _current_request_authorizes_write(user_input: str) -> bool:
     return not all(t in _AFFIRMATION_TOKENS for t in tokens)
 
 
-def _intent_messages(state):
-    messages = [SystemMessage(content=INTENT_SYSTEM_PROMPT)]
+def _intent_messages(state, system_prompt=None):
+    messages = [SystemMessage(content=system_prompt or INTENT_SYSTEM_PROMPT)]
     hint = _CONVENTION_HINTS.get(state.get("convention"))
     if hint:
         messages.append(SystemMessage(content=hint))

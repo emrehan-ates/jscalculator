@@ -78,6 +78,29 @@ def build_prepare_graph():
     return b.compile()
 
 
+def build_prepare_from_intent_graph():
+    """Like build_prepare_graph, but starts from an already-classified task
+    (intent/params/target_class set) — used for one task of a multi-task
+    request, where re-classifying the whole message would be wrong."""
+    b = StateGraph(GraphState)
+    b.add_node("resolve_parent", resolve_parent)
+    b.add_node("get_schema", get_schema)
+    b.add_node("build_payload", build_payload)
+    b.add_node("validate_payload", validate_payload)
+    b.add_node("fix_payload", fix_payload)
+    b.add_node("build_dn", build_dn)
+
+    b.set_entry_point("resolve_parent")
+    b.add_edge("resolve_parent", "get_schema")
+    b.add_edge("get_schema", "build_payload")
+    b.add_edge("build_payload", "validate_payload")
+    b.add_conditional_edges("validate_payload", validation_router,
+        {"valid": "build_dn", "fix": "fix_payload", "give_up": END})
+    b.add_edge("fix_payload", "validate_payload")
+    b.add_edge("build_dn", END)
+    return b.compile()
+
+
 def build_execute_graph():
     """login + POST only — after approval."""
     b = StateGraph(GraphState)

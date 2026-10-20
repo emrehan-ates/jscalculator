@@ -35,8 +35,8 @@ import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.server import app as chainlit_server
 
-from orchestrator.supervisor import prepare as prepare_request
-from orchestrator.supervisor import execute_create
+from orchestrator.supervisor import (decompose as decompose_request, execute_create,
+                                     prepare_creates, run_agentic_task)
 from orchestrator.chat_memory import (
     append_chat_turn,
     normalize_chat_history,
@@ -287,6 +287,17 @@ async def on_chat_resume(thread):
 
 def _plan_text(state):
     payload = state.get("payload", {})
+    if state.get("intent") == "batch":
+        parts = [f"**Planned operation:** `{state.get('target_class')}` — applied together "
+                 "(one APIC transaction per stage; a failing stage stops the rest).\n"]
+        for sec in payload:
+            stage = f" — stage {sec['stage']}" if sec.get("stage") else ""
+            details = sec.get("params") if sec.get("stage") else sec.get("details")
+            parts.append(f"**Task {sec['task']} — {sec['summary']}** (`{sec['operation']}`{stage})")
+            if sec.get("stage"):
+                parts.append(f"_{sec['details']}_")
+            parts.append(f"```json\n{json.dumps(details, indent=2, ensure_ascii=False)}\n```")
+        return "\n".join(parts) + "\n"
     return (
         f"**Planned operation:**\n\n"
         f"- Type: `{state.get('target_class')}`\n"
@@ -306,6 +317,7 @@ def _curate_plan(state):
         "payload": state.get("payload"),
         "post_path": state.get("post_path"),
         "post_body": state.get("post_body"),
+        "batch": state.get("batch"),
         "trail": state.get("trail", []),
     }
 
@@ -362,113 +374,136 @@ async def on_message(message: cl.Message):
         await show_my_requests(username)
         return
 
-    # ---- Normal request handling ----
+    # ---- Normal request handling: split into atomic tasks ----
     team = claims["team"]
     profile = cl.user_session.get("chat_profile") or ""
+    history = _chat_history()
     try:
-        state = await prepare_request(
-            message.content,
-            fabric,
-            team=team,
-            profile=profile,
-            chat_history=_chat_history(),
-        )
+        decomp = await decompose_request(text, fabric, team=team, profile=profile,
+                                         chat_history=history)
     except Exception as e:
         await cl.Message(content=f"⚠️ Unexpected error: {e}").send()
         return
+    if decomp.get("errors"):
+        response_text = "⚠️ " + "\n".join(decomp["errors"])
+        await cl.Message(content=response_text).send()
+        _remember_turn(text, response_text)
+        return
 
-    flow = state.get("flow", "unknown")
+    tasks = decomp["tasks"]
+    creates = [t for t in tasks if t["flow"] == "create"]
+    if creates and not await _confirm_tasks(tasks):
+        response_text = "❌ Cancelled. Nothing was run or sent to APIC."
+        await cl.Message(content=response_text).send()
+        _remember_turn(text, response_text)
+        return
+
+    # Read / troubleshooting tasks: one agent run each, in order.
+    parts = []
+    numbered = len(tasks) > 1
+    for t in (t for t in tasks if t["flow"] == "agentic"):
+        try:
+            st = await run_agentic_task(t["question"], fabric, chat_history=history)
+            answer = st.get("agent_final_answer") or "The agent could not produce an answer."
+            trail = st.get("trail", [])
+        except Exception as e:
+            answer, trail = f"⚠️ Unexpected error: {e}", []
+        if numbered:
+            answer = f"**{t['id']}) {t['summary']}**\n\n{answer}"
+        await _send_with_trail(answer, decomp.get("trail", []) + trail)
+        parts.append(answer)
+
+    # Create tasks: one approval plan for all of them.
+    if creates:
+        try:
+            state = await prepare_creates(tasks, text, fabric, team=team, profile=profile)
+        except Exception as e:
+            state = {"flow": "create", "errors": [f"Unexpected error: {e}"], "trail": []}
+        parts.append(await _handle_create_plan(state, text, claims))
+
+    _remember_turn(text, "\n\n".join(p for p in parts if p))
+
+
+async def _send_with_trail(content: str, trail):
+    msg = await cl.Message(content=content).send()
+    if trail:
+        async with cl.Step(name="Steps", type="tool", parent_id=msg.id) as step:
+            step.output = "\n".join(f"→ {t}" for t in trail)
+    return msg
+
+
+async def _confirm_tasks(tasks) -> bool:
+    """Show the parsed task list and ask the user to continue (only called
+    when the request contains at least one create)."""
+    lines = [f"**I understood {len(tasks)} task(s):**\n"]
+    for t in tasks:
+        icon = "🛠️" if t["flow"] == "create" else "🔎"
+        after = f" — after task {', '.join(map(str, t['depends_on']))}" if t.get("depends_on") else ""
+        kind = f"`{t['intent']}`" if t["flow"] == "create" else "question"
+        lines.append(f"{t['id']}. {icon} {t['summary']} ({kind}{after})")
+    lines.append("\nQuestions are answered first; all changes are then prepared together "
+                 "and sent for approval as ONE request. Continue?")
+    res = await cl.AskActionMessage(
+        content="\n".join(lines),
+        actions=[cl.Action(name="tasks_ok", payload={"value": "continue"}, label="▶️ Continue"),
+                 cl.Action(name="tasks_cancel", payload={"value": "cancel"}, label="❌ Cancel")],
+        timeout=300,
+    ).send()
+    return bool(res) and res.get("payload", {}).get("value") == "continue"
+
+
+async def _handle_create_plan(state, text, claims) -> str:
+    """Show a prepared create plan and route it to approval. Returns the text
+    shown, for chat memory."""
+    fabric = cl.user_session.get("fabric") or {}
+    username = claims["username"]
     errors = state.get("errors", [])
-    trail_text = "\n".join(f"→ {t}" for t in state.get("trail", []))
+    trail = state.get("trail", [])
 
-    async def send_answer(content: str):
-        msg = await cl.Message(content=content).send()
-        if trail_text:
-            async with cl.Step(name="Steps", type="tool", parent_id=msg.id) as step:
-                step.output = trail_text
-        return msg
+    if errors:
+        problem_text = "⚠️ **Problem — nothing was sent for approval:**\n" + "\n".join(f"- {e}" for e in errors)
+        await _send_with_trail(problem_text, trail)
+        return problem_text
 
-    if errors and flow != "agentic":
-        problem_text = "⚠️ **Problem:**\n" + "\n".join(f"- {e}" for e in errors)
-        await send_answer(problem_text)
-        if flow == "create" and not state.get("dn"):
-            _remember_turn(text, problem_text)
-            return
+    dn = state.get("dn")
+    if not dn:
+        response_text = "⚠️ Could not prepare a plan (no DN)."
+        await _send_with_trail(response_text, trail)
+        return response_text
 
-    if flow == "agentic":
-        answer = state.get("agent_final_answer")
-        if answer:
-            response_text = answer
-        else:
-            response_text = "The agent could not produce an answer."
-        await send_answer(response_text)
-        _remember_turn(text, response_text)
-        return
+    plan_text = _plan_text(state)
+    if claims["role"] == "admin":
+        # Admin is the approver → inline immediate approval
+        return await handle_admin_approval(state, plan_text, fabric) or ""
 
-    if flow == "unknown":
-        response_text = "🤔 I couldn't understand the request."
-        await send_answer(response_text)
-        _remember_turn(text, response_text)
-        return
-
-    if flow == "create":
-        dn = state.get("dn")
-        if not dn:
-            response_text = "⚠️ Could not prepare a plan (no DN)."
-            await send_answer(response_text)
-            _remember_turn(text, response_text)
-            return
-
-        plan_text = _plan_text(state)
-
-        if role == "admin":
-            # Admin is the approver → inline immediate approval
-            response_text = await handle_admin_approval(state, plan_text, fabric)
-            if response_text:
-                _remember_turn(text, response_text)
-        else:
-            # User → queue it persistently, end the turn
-            summary = f"{state.get('target_class')} @ {dn}"
-            requester_email = claims["email"]
-            fabric = cl.user_session.get("fabric", {})
-            fabric_name = fabric.get("name", " ")
-            aid = await approvals.create(
-                username,
-                requester_email,
-                message.content,
-                state.get("intent", ""),
-                summary,
-                _curate_plan(state),
-                fabric_name,
-            )
-            admin_emails = users.get_admin_emails()
-
-            
-            if admin_emails:
-                payload = state.get("payload", {})
-                email_body = (
-                    f"A new approval request (#{aid}) has been submitted.\n\n"
-                    f"Requested By : {username}\n"
-                    f"Fabric       : {fabric_name}\n"
-                    f"Request      : {message.content}\n"
-                    f"Type         : {state.get('target_class')}\n"
-                    f"DN:          : {dn}\n"
-                    f"Payload      : \n{json.dumps(payload, indent=2)}\n"
-                    "Login to http://10.6.107.105:8001 and type 'approvals' to review"
-                )
-                await send_email(
-                    admin_emails,
-                    f"[NetworkGPT] New approval request #{aid} from {username}",
-                    email_body,
-                )
-            response_text = (
-                plan_text
-                + f"\n⏳ **Submitted for admin approval as request #{aid}.**\n"
-                "An admin will review it. Type `my requests` to check the status."
-            )
-            await send_answer(response_text)
-            _remember_turn(text, response_text)
-        return
+    # User → queue it persistently, end the turn
+    summary = f"{state.get('target_class')} @ {dn}"
+    fabric_name = fabric.get("name", " ")
+    aid = await approvals.create(
+        username, claims["email"], text, state.get("intent", ""), summary,
+        _curate_plan(state), fabric_name,
+    )
+    admin_emails = users.get_admin_emails()
+    if admin_emails:
+        email_body = (
+            f"A new approval request (#{aid}) has been submitted.\n\n"
+            f"Requested By : {username}\n"
+            f"Fabric       : {fabric_name}\n"
+            f"Request      : {text}\n"
+            f"Type         : {state.get('target_class')}\n"
+            f"DN:          : {dn}\n"
+            f"Payload      : \n{json.dumps(state.get('payload', {}), indent=2, ensure_ascii=False)}\n"
+            "Login to http://10.6.107.105:8001 and type 'approvals' to review"
+        )
+        await send_email(admin_emails, f"[NetworkGPT] New approval request #{aid} from {username}",
+                         email_body)
+    response_text = (
+        plan_text
+        + f"\n⏳ **Submitted for admin approval as request #{aid}.**\n"
+        "An admin will review it. Type `my requests` to check the status."
+    )
+    await _send_with_trail(response_text, trail)
+    return response_text
 
 # ============================================================
 # Admin inline approval (admin's own write requests)

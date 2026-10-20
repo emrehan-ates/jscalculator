@@ -21,6 +21,7 @@ An empty policy/AEP value means: do not send that ref (APIC default applies).
 """
 import os
 import re
+from contextvars import ContextVar
 
 STANDARD = {
     "cdp": "Disable_CDP",
@@ -172,6 +173,56 @@ def _expand_port_block(attrs):
 
 MGMT_SCOPES = {"management", "mgmt", "all", "both"}
 
+# Ports defined EARLIER in the same multi-task request but not yet on APIC
+# (see orchestrator/batch.py). name -> {"tdns","kind","nodes"}. A data-port
+# reference that names one of them resolves to its planned path(s) instead of
+# querying APIC, so "define port X, then bind EPG Y to X" can be prepared and
+# posted together.
+_planned_ports: ContextVar = ContextVar("planned_ports", default=None)
+
+
+def set_planned_ports(planned):
+    """Install the planned-port registry for this task; returns a reset token."""
+    return _planned_ports.set(planned)
+
+
+def reset_planned_ports(token):
+    _planned_ports.reset(token)
+
+
+def planned_port_paths(name, ptype, nodes, ports):
+    """Binding path(s) a port definition will have once it is posted."""
+    nodes = [str(n) for n in nodes]
+    if ptype == "vpc":
+        n = sorted(int(x) for x in nodes)
+        return [f"topology/pod-1/protpaths-{n[0]}-{n[-1]}/pathep-[{name}]"]
+    if ptype == "pc":
+        return [f"topology/pod-1/paths-{nodes[0]}/pathep-[{name}]"]
+    eths = []
+    for p in ports:
+        parsed = _parse_port(p)
+        if parsed:
+            eths.append(f"eth{parsed['card']}/{parsed['port']}"
+                        + (f"/{parsed['sub']}" if parsed["sub"] else ""))
+    return [f"topology/pod-1/paths-{n}/pathep-[{e}]" for n in nodes for e in eths]
+
+
+def _planned_lookup(ref):
+    """Planned-port match for a {"serial"} data reference, or None."""
+    planned = _planned_ports.get()
+    token = str(ref.get("serial") or ref.get("name") or "").strip().upper()
+    if not planned or not token:
+        return None
+    hits = [n for n in planned if token in n.upper()]
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return {"error": f"'{token}' matches several ports defined in this request: {', '.join(hits)}"}
+    p = planned[hits[0]]
+    return {"tdns": p["tdns"], "tdn": p["tdns"][0], "kind": p["kind"], "nodes": p["nodes"],
+            "label": f"{hits[0]} ({p['kind']}, planned in this request, {len(p['tdns'])} path(s))",
+            "error": None}
+
 
 async def resolve_port_ref(ref):
     """Resolve a port reference to its static-binding tDn(s).
@@ -184,6 +235,10 @@ async def resolve_port_ref(ref):
       - "all": data + management paths together.
     """
     scope = str((ref or {}).get("scope") or "data").strip().lower() if isinstance(ref, dict) else "data"
+    if scope not in MGMT_SCOPES and isinstance(ref, dict):
+        planned = _planned_lookup(ref)
+        if planned:
+            return planned
     if scope not in MGMT_SCOPES or not isinstance(ref, dict) or not (ref.get("serial") or ref.get("name")):
         return await _resolve_data_port_ref(ref)
 
