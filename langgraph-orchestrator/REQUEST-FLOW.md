@@ -734,9 +734,12 @@ flow'da ayni mantik `find_management_ports` tool'u olarak kayitlidir.
    (ESX(I)-Infra management profilleri asla degistirilmez).
 2. Selector'lerin policy group'lari (`infraRsAccBaseGrp.tDn`) toplanir.
 3. Takim = kullanicinin takimi, yoksa profil prefix'i (MSY_/CSY_).
-4. `infraAttEntityP` GET edilir ve `<TAKIM>_baremetal` her buyuk/kucuk harf ve
-   ayirici (`MSY_Baremetal`, `MSY_BAREMETAL`, `MSY-Bare_Metal`) icin aranir;
-   APIC'teki gercek isim kullanilir. Birden fazla eslesirse islem durur.
+4. `infraAttEntityP` GET edilir ve takimin olasi baremetal AEP isimleri aranir
+   (`BAREMETAL_AEPS`, buyuk/kucuk harf duyarsiz): MSY icin `MSY_BAREMETAL` veya
+   `BARE_METAL`; CSY icin `BARE_METAL`, `CSY_BAREMETAL` veya `CSY_BARE_METAL`.
+   Her fabric'te takim basina bunlardan en fazla biri bulunur; APIC'teki gercek
+   isim kullanilir. Birden fazla eslesirse islem durur; baska takimlar icin
+   tanimli isim yoktur.
 5. Baska sunucularin profilleri tarafindan da kullanilan policy group atlanir
    (`skipped`), zaten baremetal'de olanlar `already_baremetal` olarak listelenir.
 6. Kalan policy group'larin `infraRsAttEntP.tDn`'i tek atomik `polUni` POST'u

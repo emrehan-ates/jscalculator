@@ -7,7 +7,7 @@ from unittest import mock
 
 from orchestrator import dvs_removal, nodes_common
 
-AEPS = ["MSY_ESX_AEP", "MSY_BareMetal", "CSY_BAREMETAL", "CSY_ESX_AEP"]
+AEPS = ["MSY_ESX_AEP", "MSY_BAREMETAL", "CSY_BAREMETAL", "CSY_ESX_AEP"]
 # profile -> [(selector, pg tDn)]
 PROFILES = {
     "MSY_CX1": [("MSY_CX1", "uni/infra/funcprof/accbundle-MSY_CX1")],
@@ -68,6 +68,13 @@ def build(params, team=""):
         return asyncio.run(dvs_removal.build_remove_from_dvs(params, "dvs'ten çıkar", team=team))
 
 
+def find_aep(team, aeps):
+    async def fake_get(path, params=None):
+        return [{"infraAttEntityP": {"attributes": {"name": n}}} for n in aeps]
+    with mock.patch.object(dvs_removal, "_get", fake_get):
+        return asyncio.run(dvs_removal.find_baremetal_aep(team))
+
+
 def posted(prep):
     out = {}
     infra = prep["post_body"]["polUni"]["children"][0]["infraInfra"]["children"][0]["infraFuncP"]
@@ -84,12 +91,12 @@ class RemoveFromDvsTests(unittest.TestCase):
 
         self.assertFalse(prep["errors"])
         self.assertEqual(posted(prep), {
-            "MSY_CX1": ("infraAccBndlGrp", "uni/infra/attentp-MSY_BareMetal")})
+            "MSY_CX1": ("infraAccBndlGrp", "uni/infra/attentp-MSY_BAREMETAL")})
         self.assertEqual(prep["payload"]["changes"][0]["from_aep"], "MSY_ESX_AEP")
 
     def test_team_from_profile_prefix_when_user_has_no_team(self):
         prep = build({"servers": ["CX1"]})
-        self.assertEqual(posted(prep)["MSY_CX1"][1], "uni/infra/attentp-MSY_BareMetal")
+        self.assertEqual(posted(prep)["MSY_CX1"][1], "uni/infra/attentp-MSY_BAREMETAL")
 
     def test_shared_policy_group_is_skipped(self):
         prep = build({"servers": [{"serial": "CX1"}, {"serial": "CX2"}]}, team="MSY")
@@ -110,12 +117,29 @@ class RemoveFromDvsTests(unittest.TestCase):
         self.assertIn("already on the baremetal AEP", prep["errors"][0])
         self.assertIn("NOPE", prep["errors"][0])
 
-    def test_baremetal_aep_name_matching(self):
-        pat = dvs_removal._baremetal_re("MSY")
-        for name in ("MSY_Baremetal", "MSY_BAREMETAL", "msy-baremetal", "MSY_Bare_Metal"):
-            self.assertTrue(pat.match(name), name)
-        self.assertFalse(pat.match("MSY_BAREMETAL_OLD"))
-        self.assertFalse(pat.match("CSY_BAREMETAL"))
+    def test_baremetal_aep_names_per_team(self):
+        cases = [
+            ("MSY", ["MSY_ESX_AEP", "MSY_BAREMETAL"], "MSY_BAREMETAL"),
+            ("MSY", ["MSY_ESX_AEP", "BARE_METAL"], "BARE_METAL"),
+            ("CSY", ["BARE_METAL", "MSY_BAREMETAL"], "BARE_METAL"),
+            ("CSY", ["CSY_BAREMETAL", "MSY_BAREMETAL"], "CSY_BAREMETAL"),
+            ("CSY", ["CSY_BARE_METAL"], "CSY_BARE_METAL"),
+            ("msy", ["Msy_BareMetal"], "Msy_BareMetal"),  # real APIC spelling is kept
+        ]
+        for team, aeps, want in cases:
+            self.assertEqual(find_aep(team, aeps), (want, None), (team, aeps))
+
+    def test_baremetal_aep_not_found(self):
+        for team, aeps in [("MSY", ["CSY_BAREMETAL", "MSY_BAREMETAL_OLD", "MSY_BARE_METAL"]),
+                           ("CSY", ["MSY_BAREMETAL", "CSY-BAREMETAL"])]:
+            name, err = find_aep(team, aeps)
+            self.assertIsNone(name)
+            self.assertIn("no baremetal AEP found", err)
+
+    def test_baremetal_aep_unknown_team(self):
+        name, err = find_aep("SG", ["BARE_METAL"])
+        self.assertIsNone(name)
+        self.assertIn("known teams", err)
 
 
 if __name__ == "__main__":
