@@ -8,10 +8,10 @@ For every server the user names:
   3. point that policy group's AEP relation (infraRsAttEntP) at the team's
      baremetal AEP.
 
-The baremetal AEP name differs in case/separator between fabrics
-(MSY_Baremetal, MSY_BAREMETAL, MSY-BareMetal ...), so it is looked up with a
-GET first and the real name is used. Team = the logged-in user's team, else
-the server's own MSY_/CSY_ name prefix.
+The baremetal AEP name differs between fabrics; each team has a fixed list of
+possible names (BAREMETAL_AEPS) and at most one of them exists per fabric, so
+the AEPs are listed with a GET first and the real name is used. Team = the
+logged-in user's team, else the server's own MSY_/CSY_ name prefix.
 
 Safety: a policy group that is also used by interface profiles of OTHER
 servers is skipped (changing it would move those servers too). Policy groups
@@ -26,19 +26,27 @@ INTENT = "remove_from_dvs"
 _TEAM_RE = re.compile(r"^(MSY|CSY)[_-]", re.I)
 
 
-def _baremetal_re(team):
-    return re.compile(rf"^{re.escape(team)}[-_ ]?bare[-_ ]?metal$", re.I)
+# Possible baremetal AEP names per team; at most one exists on a fabric.
+BAREMETAL_AEPS = {
+    "MSY": ("MSY_BAREMETAL", "BARE_METAL"),
+    "CSY": ("BARE_METAL", "CSY_BAREMETAL", "CSY_BARE_METAL"),
+}
 
 
 async def find_baremetal_aep(team):
-    """Return (aep_name, None) or (None, error) for <team>_baremetal."""
+    """Return (aep_name, None) or (None, error) for the team's baremetal AEP."""
+    candidates = BAREMETAL_AEPS.get(team.upper())
+    if not candidates:
+        return None, (f"no baremetal AEP names known for team {team} "
+                      f"(known teams: {', '.join(BAREMETAL_AEPS)})")
     items = await _get("/api/node/class/infraAttEntityP.json",
                        {"rsp-prop-include": "naming-only"})
     names = [_attrs(i, "infraAttEntityP").get("name", "") for i in items]
-    pat = _baremetal_re(team)
-    hits = sorted({n for n in names if pat.match(n)})
+    wanted = {c.upper() for c in candidates}
+    hits = sorted({n for n in names if n.upper() in wanted})
     if not hits:
-        return None, f"no baremetal AEP found for team {team} (looked for {team}_baremetal in any case/separator)"
+        return None, (f"no baremetal AEP found for team {team} "
+                      f"(looked for {' / '.join(candidates)})")
     if len(hits) > 1:
         return None, f"several baremetal AEPs match team {team}: {', '.join(hits)}"
     return hits[0], None
