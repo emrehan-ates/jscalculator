@@ -17,6 +17,7 @@ from .graph_agentic import build_agentic_graph
 from .agentic_aci_kb import aci_lookup_class
 from .mgmt_ports import find_management_ports
 from .dvs_removal import build_remove_from_dvs
+from .epg_define import prepare_define_epg
 from .chat_memory import normalize_chat_history
 from .mcp_runtime import get_runtime_manager
 from .nodes_agentic import MAX_AGENT_ITERATIONS
@@ -588,11 +589,13 @@ async def run(user_input, fabric, team="", profile="", chat_history=None):
             config={"recursion_limit": AGENTIC_RECURSION_LIMIT},
         )
 
-async def prepare_create_task(task, user_input, team="", convention=None):
+async def prepare_create_task(task, user_input, team="", convention=None, fabric=None):
     """Prepare ONE already-classified create task of a multi-task request.
     Returns the same prepared-state shape as prepare() does for a create."""
     intent = task.get("intent", "")
     params = copy.deepcopy(task.get("params") or {})  # builders mutate refs
+    if intent == "define_epg":
+        return await prepare_define_epg(params, user_input, fabric)
     if intent == "bind_epg":
         return await _build_binding(params, user_input)
     if intent == "bind_vmm_domain":
@@ -636,12 +639,30 @@ async def run_agentic_task(question, fabric, chat_history=None):
     return result
 
 
+async def epg_admin_choices(fabric, kind, tenant=None):
+    """Lists for the admin's define_epg wizard: tenants, aps, vrfs, domains."""
+    from . import epg_define
+    await _load_tools(fabric)
+    from .nodes_common import get_tool
+    await get_tool("apic_login").ainvoke({})
+    if kind == "tenants":
+        return await epg_define.list_tenants()
+    if kind == "aps":
+        return await epg_define.list_aps(tenant)
+    if kind == "vrfs":
+        return await epg_define.list_vrfs(tenant)
+    if kind == "domains":
+        return await epg_define.list_domains()
+    raise ValueError(kind)
+
+
 async def prepare_creates(tasks, user_input, fabric, team="", profile=""):
     """Prepare every create task of a request into one approval plan."""
     from .batch import prepare_create_batch
     await _load_tools(fabric)
     return await prepare_create_batch(tasks, user_input, team=team,
-                                      convention=detect_switch_convention(profile))
+                                      convention=detect_switch_convention(profile),
+                                      fabric=fabric)
 
 
 #this welcones the prompt and route according to intent

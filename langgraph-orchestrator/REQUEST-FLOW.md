@@ -1087,6 +1087,31 @@ Bir mesaj birden fazla create ve/veya soru icerebilir. `chainlit_app.on_message`
 
 Tek create'lik istek bugunku plan gorunumuyle ayni sekilde onaya gider.
 
+## EPG Tanimlama (`define_epg`, `orchestrator/epg_define.py`)
+
+- **Istek**: kullanici EPG taban ad(lar)ini ve VLAN havuzunu verir (istege
+  bagli domain'ler). VLAN Desk API'den (`vlan_api.py`) chat profilinin
+  fabric'ine ait source (`FABRIC_<n>_VLAN_SOURCE`) ve havuzdan istenen sayida
+  bos VLAN alinir; ad `<TABAN>_<VLAN>` olur, BD ayni adla acilir. Bu asamada
+  VLAN rezerve edilmez. APIC'te ayni adli EPG varsa istek durur.
+- **Plan** her zaman batch formundadir (`plan.epg_requests`). Ayni istekteki
+  bind gibi gorevler EPG'ye bagimli sonraki asamaya alinir ve EPG'yi taban
+  adiyla anar.
+- **Admin onayi** (`chainlit_app._collect_epg_admin_input`): APIC'ten gelen
+  butonlarla tenant -> AP -> VRF (tenant + common), her EPG icin subnet
+  (gateway/mask, `none` = L2) ve scope, domain ekle/cikar, ozet ve onay
+  -> `plan.epg_admin`.
+- **Uygulama** (`batch.execute_batch`): her VLAN once VLAN API'de rezerve edilir
+  (409 = arada alinmis -> siradaki bos VLAN, ad degisir, rapora yazilir ve
+  sonraki asamadaki bind'ler yeni ada yonlendirilir). EPG/BD agaci asama-1
+  POST'una eklenir. APIC reddederse rezervasyonlar geri birakilir.
+- **Sablon** (BD-/epg-ZT_PROD_APP_110): BD `arpFlood=yes`,
+  `limitIpLearnToSubnets=yes`, `unkMacUcastAct=proxy`, `multiDstPktAct=bd-flood`;
+  subnet varsa `unicastRoute=yes` + `fvSubnet`, yoksa `unicastRoute=no`. EPG
+  `prio=level3`, `pcEnfPref=unenforced`, `prefGrMemb=exclude`; fiziksel domain
+  `resImedcy=immediate`, VMM domain `pre-provision` + domain'in tek enhanced
+  LAG policy'si varsa o. Static binding eklenmez.
+
 ## Kimlik Dogrulama ve Kayit
 
 - **Kullanici deposu** (`users.py`): SQLite (`USERS_DB`), sifreler bcrypt hash.

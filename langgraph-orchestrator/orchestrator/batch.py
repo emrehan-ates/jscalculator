@@ -16,6 +16,11 @@ Dependencies between creates:
   - KNOWN (prepared from the plan, same POST): a port defined in this request
     used by bind_epg / bind_vmm_domain / copy_epg_bindings (its path is
     computed from the definition), and create_bd in a tenant created here.
+  - define_epg is completed by the admin at approval (tenant/AP/VRF/subnet/
+    domains); its VLANs are reserved on the VLAN API and its EPG/BD tree is
+    added to the stage-1 POST at execution. Tasks that use the new EPG
+    (bind_epg ...) are later-stage tasks; the user's base name is rewritten
+    to the final <BASE>_<VLAN> name before they are prepared.
   - anything else: the dependent task moves to a later STAGE; it is prepared
     against live APIC data right after the earlier stage is applied. If that
     preparation or its POST fails, execution stops and reports what was and
@@ -27,6 +32,7 @@ import re
 from .nodes_common import (INTENT_SYSTEM_PROMPT, _intent_messages,
                            _current_request_authorizes_write, extract_json_from_llm,
                            get_llm, get_tool, unwrap_mcp_result)
+from . import epg_define
 from .nodes_port import planned_port_paths, reset_planned_ports, set_planned_ports
 
 MAX_TASKS = 20
@@ -59,7 +65,9 @@ Rules:
   uses (bind_epg to a port that an earlier define_port creates; create_bd in
   a tenant an earlier create_tenant creates). Creates never depend on agentic
   tasks. When a task uses an object an earlier task creates, refer to it by
-  the SAME name (e.g. the define_port "name" as the bind_epg "serial").
+  the SAME name (e.g. the define_port "name" as the bind_epg "serial"; a new
+  EPG from define_epg by its BASE name in bind_epg "epgs", and depends_on that
+  define_epg — the VLAN suffix is added automatically).
 - A request with a single operation returns a list with ONE task.
 """
 
@@ -116,6 +124,9 @@ def assign_stages(tasks):
         if t["flow"] != "create":
             continue
         stage = 0
+        if t["intent"] == "define_epg":
+            # Needs the admin's input at approval; always part of stage 1.
+            t["depends_on"] = []
         for d in t["depends_on"]:
             dep = by_id[d]
             same = (dep["intent"], t["intent"]) in KNOWN_DEPS
@@ -237,7 +248,7 @@ def merge_preps(preps):
 # Preparation and execution
 # ---------------------------------------------------------------------------
 
-async def _prepare_stage(tasks, user_input, team, convention):
+async def _prepare_stage(tasks, user_input, team, convention, fabric=None):
     """Prepare tasks in order. Ports defined by earlier tasks of the SAME
     stage are visible to later ones. Returns (preps, errors)."""
     from .supervisor import prepare_create_task
@@ -245,7 +256,8 @@ async def _prepare_stage(tasks, user_input, team, convention):
     for t in tasks:
         token = set_planned_ports(dict(planned))
         try:
-            prep = await prepare_create_task(t, user_input, team=team, convention=convention)
+            prep = await prepare_create_task(t, user_input, team=team, convention=convention,
+                                             fabric=fabric)
         except Exception as e:
             prep = {"errors": [f"unexpected error: {e}"]}
         finally:
@@ -269,16 +281,17 @@ def _section(prep):
             "details": prep.get("payload")}
 
 
-async def prepare_create_batch(tasks, user_input, team="", convention=None):
+async def prepare_create_batch(tasks, user_input, team="", convention=None, fabric=None):
     """One prepared-state for all create tasks (approval plan).
 
     A request with a single create returns that create's own prepared state,
-    so the plan looks exactly as before."""
+    so the plan looks exactly as before (define_epg always uses the batch
+    form: it needs the admin's input and the VLAN API at execution)."""
     creates = [t for t in tasks if t["flow"] == "create"]
     now = [t for t in creates if t.get("stage", 0) == 0]
     later = [t for t in creates if t.get("stage", 0) > 0]
 
-    preps, errors = await _prepare_stage(now, user_input, team, convention)
+    preps, errors = await _prepare_stage(now, user_input, team, convention, fabric)
     if errors:
         return {"flow": "create", "intent": "batch", "user_input": user_input,
                 "errors": errors + ["Nothing was sent for approval. Fix the tasks above and "
@@ -286,14 +299,15 @@ async def prepare_create_batch(tasks, user_input, team="", convention=None):
                 "trail": [f"batch: {len(errors)} task(s) could not be prepared"]}
 
     trail = [t for p in preps for t in p.get("trail", [])]
-    if len(preps) == 1 and not later:
+    epg_requests = [dict(p["epg_request"], task=p["task"]) for p in preps if p.get("epg_request")]
+    if len(preps) == 1 and not later and not epg_requests:
         single = dict(preps[0])
         single.pop("task", None)
         single.pop("planned_port", None)
         return single
 
     try:
-        body = merge_preps(preps)
+        body = merge_preps([p for p in preps if not p.get("epg_request")])
     except ValueError as e:
         return {"flow": "create", "intent": "batch", "user_input": user_input,
                 "errors": [f"Could not combine the tasks into one change: {e}"],
@@ -315,8 +329,10 @@ async def prepare_create_batch(tasks, user_input, team="", convention=None):
         "post_path": "/api/node/mo/uni.json",
         "post_body": body,
         "batch": {"team": team, "convention": convention,
+                  "vlan_source": (fabric or {}).get("vlan_source", ""),
                   "stage0_tasks": [p["task"] for p in preps],
                   "pending": later},
+        "epg_requests": epg_requests,
         "errors": [],
         "trail": trail + [f"batch: {len(preps)} task(s) in stage 1"
                           + (f", {len(later)} task(s) in later stage(s)" if later else "")],
@@ -338,6 +354,46 @@ async def _post(path, body):
     return unwrap_mcp_result(raw)
 
 
+def _rename_epgs(tasks, renames):
+    """Point later tasks at the final <BASE>_<VLAN> EPG names."""
+    if not renames:
+        return tasks
+    out = []
+    for t in tasks:
+        t = json.loads(json.dumps(t))
+        p = t.get("params") or {}
+        for key in ("epgs", "epg"):
+            if isinstance(p.get(key), list):
+                p[key] = [renames.get(n, n) for n in p[key]]
+            elif isinstance(p.get(key), str):
+                p[key] = renames.get(p[key], p[key])
+        out.append(t)
+    return out
+
+
+async def _epg_children(plan, lines, trail):
+    """Reserve the VLANs of every define_epg request and build their trees.
+    Returns (children, renames, reserved, error)."""
+    admin = plan.get("epg_admin")
+    if not admin:
+        return [], {}, [], "the EPG definition is missing the admin's tenant/AP/VRF choices"
+    children, renames, reserved = [], {}, []
+    note = f"NetworkGPT {plan.get('approval_ref') or ''}".strip()
+    for req in plan["epg_requests"]:
+        epgs, ren, res, err = await epg_define.allocate(req, note)
+        reserved.extend(res)
+        renames.update(ren)
+        if err:
+            return [], renames, reserved, f"VLAN reservation failed: {err}"
+        children.extend(await epg_define.build_tree(epgs, admin))
+        trail.append(f"define_epg: reserved {res} on {req['source']}/{req['pool']}")
+        moved = {o: n for o, n in ren.items() if o != n.rsplit("_", 1)[0]}
+        if moved:
+            lines.append("VLAN taken since the request — renamed: "
+                         + ", ".join(f"{o} -> {n}" for o, n in moved.items()))
+    return children, renames, reserved, None
+
+
 async def execute_batch(plan):
     """Apply an approved batch plan stage by stage; stop at the first failure."""
     batch = plan.get("batch") or {}
@@ -349,19 +405,39 @@ async def execute_batch(plan):
         return ", ".join(f"#{t['id']} {t['summary']}" for t in tasks)
 
     stage_tasks = batch.get("stage0_tasks", [])
-    result = await _post(plan["post_path"], plan["post_body"])
+    body, renames, reserved = plan["post_body"], {}, []
+    if plan.get("epg_requests"):
+        extra, renames, reserved, err = await _epg_children(plan, lines, trail)
+        if err:
+            leaked = await epg_define.release_all(reserved)
+            lines.append(f"Stage 1 NOT applied — {err}"
+                         + (f". Release these VLAN reservations by hand: {leaked}" if leaked else ""))
+            return {**plan, "final_result": {"error": err}, "batch_results": [
+                {"stage": 1, "tasks": [t["id"] for t in stage_tasks], "ok": False, "error": err}],
+                "batch_summary": "\n".join(lines), "trail": plan.get("trail", []) + trail}
+        body = {"polUni": {"attributes": {}, "children": merge_children(
+            list(body.get("polUni", {}).get("children", [])) + extra)}}
+
+    result = await _post(plan["post_path"], body)
     err = _apic_error(result)
     results.append({"stage": 1, "tasks": [t["id"] for t in stage_tasks], "ok": err is None, "error": err})
     trail.append(f"batch stage 1: POST {'ok' if err is None else 'FAILED'}")
     if err:
         lines.append(f"Stage 1 FAILED — APIC rejected the change, nothing was applied: {err}")
+        if reserved:
+            leaked = await epg_define.release_all(reserved)
+            lines.append("VLAN reservations released." if not leaked else
+                         f"Release these VLAN reservations by hand: {leaked}")
     else:
         lines.append(f"Stage 1 applied: {label(stage_tasks)}")
-        pending = batch.get("pending", [])
+        if reserved:
+            lines.append(f"VLANs marked in use on the VLAN API: {reserved}")
+        pending = _rename_epgs(batch.get("pending", []), renames)
+        fabric = {"vlan_source": batch.get("vlan_source", "")}
         for k, stage in enumerate(sorted({t["stage"] for t in pending}), start=2):
             tasks = [t for t in pending if t["stage"] == stage]
             preps, errors = await _prepare_stage(tasks, user_input, batch.get("team", ""),
-                                                 batch.get("convention"))
+                                                 batch.get("convention"), fabric)
             if errors:
                 err = "; ".join(errors)
                 result = {"error": f"stage {k} could not be prepared: {err}"}

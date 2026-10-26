@@ -186,6 +186,11 @@ DETERMINISTIC CREATE (POST) — write operations, approval-gated:
   storm/STP/LACP) from an EXISTING port, onto a NEW leaf+port the user gives.
   The new name (TEAM_SERIAL) is applied to the policy group, interface profile,
   selector, and all descriptions.
+- define_epg — define one or more NEW EPGs (VLANs), each with its own new
+  bridge domain ("MSY_APP için Legacy havuzundan yeni EPG/VLAN aç", "create
+  EPGs X and Y from the Static pool"). Free VLANs are taken from the VLAN
+  pool automatically and appended to the names; tenant, AP, VRF and subnets
+  are chosen by the admin at approval.
 - remove_from_dvs — take one or more servers OUT OF the DVS / VMM ("şu
   sunucuları DVS'ten çıkar", "remove X and Y from the DVS", "baremetal'e al"):
   their data policy groups are moved to the team's baremetal AEP. The AEP is
@@ -238,6 +243,8 @@ Respond ONLY with a JSON object. Examples:
 {"intent":"copy_epg_bindings","flow":"create","params":{"source":{"serial":"MSY_CX124553KT"},"destinations":[{"serial":"CX2204300RT"},{"serial":"CZ24160G9N"},{"node":"101","port":"eth1/5"}]},"target_class":"fvRsPathAtt"}
 {"intent": "bind_epg", "flow": "create", "params": {"epgs": ["ESX_MGMT_110"], "mode": "trunk", "bindings": [{"serial": "CX124553KT", "scope": "management"}]}, "target_class": "fvRsPathAtt"}
 {"intent":"copy_epg_bindings","flow":"create","params":{"source":{"serial":"CX124553KT","scope":"management"},"destinations":[{"serial":"CZ24160G9N","scope":"management"},{"serial":"CX2204300RT","scope":"management"}]},"target_class":"fvRsPathAtt"}
+{"intent":"define_epg","flow":"create","params":{"epgs":["MSY_APP","MSY_DB"],"pool":"Legacy"},"target_class":"fvAEPg"}
+{"intent":"define_epg","flow":"create","params":{"epgs":["CSY_WEB"],"pool":"Static","domains":["Legacy_Pdom","Sub-CSY"]},"target_class":"fvAEPg"}
 {"intent":"remove_from_dvs","flow":"create","params":{"servers":[{"serial":"CX124553KT"},{"serial":"MSY_CZ24160G9N"}]},"target_class":"infraRsAttEntP"}
 {"intent":"copy_port_definition","flow":"create","params":{"name":"CZ241809QS","source":"CZ241908H2","nodes":["125"],"ports":["eth1/47"]},"target_class":"infraAccPortGrp"}
 {"intent": "agentic", "flow": "agentic", "params": {}, "target_class": ""}
@@ -312,6 +319,11 @@ PARAM RULES:
   and "ports" (LIST like ["eth1/47"]). Do NOT extract port_type, aep, or any
   policy: they are copied verbatim from the source. NEVER invent the source,
   nodes, or ports.
+- define_epg: extract "epgs" (LIST of the EPG base names exactly as the user
+  wrote them — do NOT add a VLAN, it is appended automatically), "pool" (the
+  VLAN pool the user names: Legacy, Static, DIB, Infra, APIC …) and, ONLY if
+  the user names them, "domains" (LIST of physical/VMM domain names). NEVER
+  invent the pool, tenant, AP, VRF or subnet — the admin decides those.
 - remove_from_dvs: extract "servers" (LIST of {"serial": "<serial or full
   interface-profile name>"}, one per server the user names — keep any MSY_/
   CSY_ prefix). Do NOT extract the AEP or team; the baremetal AEP of the
@@ -327,9 +339,10 @@ Class mapping (CREATE only):
 - copy_epg_bindings -> fvRsPathAtt
 - copy_port_definition -> infraAccPortGrp (access) or infraAccBndlGrp (pc/vpc)
 - remove_from_dvs -> infraRsAttEntP
+- define_epg -> fvAEPg
 - agentic -> (no class)
 
-flow is "create" for create_*/bind_epg/bind_vmm_domain/define_port/copy_epg_bindings/copy_port_definition/remove_from_dvs,
+flow is "create" for create_*/bind_epg/bind_vmm_domain/define_port/copy_epg_bindings/copy_port_definition/remove_from_dvs/define_epg,
 "agentic" for everything else.
 """
 

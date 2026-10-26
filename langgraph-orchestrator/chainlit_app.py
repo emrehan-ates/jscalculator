@@ -35,8 +35,9 @@ import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.server import app as chainlit_server
 
-from orchestrator.supervisor import (decompose as decompose_request, execute_create,
-                                     prepare_creates, run_agentic_task)
+from orchestrator.supervisor import (decompose as decompose_request, epg_admin_choices,
+                                     execute_create, prepare_creates, run_agentic_task)
+from orchestrator.epg_define import SUBNET_SCOPES, validate_subnet
 from orchestrator.chat_memory import (
     append_chat_turn,
     normalize_chat_history,
@@ -116,6 +117,8 @@ def _fabric_config(fid: int) -> dict:
         # Each fabric has its OWN APIC_CLIENT MCP server deployment.
         "apic_client_python": g("APIC_CLIENT_PYTHON", ""),
         "apic_client_server": g("APIC_CLIENT_SERVER", ""),
+        # VLAN Desk API environment id of this fabric (e.g. APIC_EVM_BANKA).
+        "vlan_source": g("VLAN_SOURCE", ""),
     }
 
 def _all_fabrics() -> list[dict]:
@@ -138,6 +141,7 @@ def _all_fabrics() -> list[dict]:
             "icon": None,
             "apic_client_python": os.environ.get("APIC_CLIENT_PYTHON", ""),
             "apic_client_server": os.environ.get("APIC_CLIENT_SERVER", ""),
+            "vlan_source": os.environ.get("VLAN_SOURCE", ""),
         })
     return fabrics
 
@@ -318,6 +322,7 @@ def _curate_plan(state):
         "post_path": state.get("post_path"),
         "post_body": state.get("post_body"),
         "batch": state.get("batch"),
+        "epg_requests": state.get("epg_requests"),
         "trail": state.get("trail", []),
     }
 
@@ -528,6 +533,11 @@ async def handle_admin_approval(state, plan_text, fabric):
         response_text = "❌ Operation cancelled. Nothing was sent to APIC."
         await cl.Message(content=response_text).send()
         return response_text
+    if state.get("epg_requests") and not await _collect_epg_admin_input(state, fabric):
+        response_text = "❌ EPG definition cancelled. Nothing was sent to APIC."
+        await cl.Message(content=response_text).send()
+        return response_text
+    state["approval_ref"] = f"by {_username()}"
 
     try:
         final_state = await execute_create(state, fabric)
@@ -605,6 +615,17 @@ async def on_approve_request(action: cl.Action):
         await cl.Message(content=f"⚠️ Fabric '{appr.get('fabric')}' artık tanımlı değil.").send()
         return
     admin = _username()
+
+    if plan.get("epg_requests"):
+        if not await _collect_epg_admin_input(plan, fabric):
+            await cl.Message(content=f"Approval of request #{approval_id} cancelled — "
+                                     "it is still pending.").send()
+            return
+        appr = await approvals.get(approval_id)
+        if not appr or appr["status"] != "pending":
+            await cl.Message(content=f"Request #{approval_id} was decided meanwhile.").send()
+            return
+    plan["approval_ref"] = f"#{approval_id}"
 
     await cl.Message(content=f"Processing request #{approval_id}…").send()
     try:
@@ -766,3 +787,126 @@ async def on_approve_signup(action: cl.Action):
 @cl.action_callback("reject_signup")
 async def on_reject_signup(action: cl.Action):
     await _decide_signup(action, approve=False)
+
+# ============================================================
+# define_epg: admin decisions at approval (tenant / AP / VRF / subnet / domains)
+# ============================================================
+
+_WIZARD_TIMEOUT = 600
+_MAX_BUTTONS = 40
+
+
+async def _ask_choice(prompt, options):
+    """Buttons; options are values or (value, label). None = cancelled."""
+    actions = []
+    for o in options:
+        value, label = o if isinstance(o, tuple) else (o, o)
+        actions.append(cl.Action(name="wizard_pick", payload={"v": value}, label=label))
+    actions.append(cl.Action(name="wizard_pick", payload={"v": "__cancel__"}, label="❌ Cancel"))
+    res = await cl.AskActionMessage(content=prompt, actions=actions, timeout=_WIZARD_TIMEOUT).send()
+    value = (res or {}).get("payload", {}).get("v")
+    return None if value in (None, "__cancel__") else value
+
+
+async def _ask_text(prompt):
+    res = await cl.AskUserMessage(content=prompt, timeout=_WIZARD_TIMEOUT).send()
+    return None if res is None else (res.get("output") or "").strip()
+
+
+async def _ask_from_list(prompt, values):
+    """Buttons for short lists, typed name (validated) for long ones."""
+    if len(values) <= _MAX_BUTTONS:
+        return await _ask_choice(prompt, values)
+    while True:
+        text = await _ask_text(f"{prompt}\n\n{len(values)} options — type the exact name "
+                               "(or `cancel`):")
+        if text is None or text.lower() == "cancel":
+            return None
+        if text in values:
+            return text
+        close = [v for v in values if text.lower() in v.lower()][:15]
+        await cl.Message(content=f"`{text}` not found." + (f" Did you mean: {', '.join(close)}"
+                                                         if close else "")).send()
+
+
+async def _collect_epg_admin_input(plan, fabric) -> bool:
+    """Ask the admin for the define_epg decisions and store them in
+    plan["epg_admin"]. False when the admin cancels."""
+    epgs = [e for r in plan["epg_requests"] for e in r["epgs"]]
+    await cl.Message(content="**New EPG(s) need your decisions:** "
+                             + ", ".join(f"`{e['name']}`" for e in epgs)).send()
+    try:
+        tenant = await _ask_from_list("1/5 — **Tenant**:", await epg_admin_choices(fabric, "tenants"))
+        if tenant is None:
+            return False
+        aps = await epg_admin_choices(fabric, "aps", tenant)
+        if not aps:
+            await cl.Message(content=f"Tenant `{tenant}` has no application profile.").send()
+            return False
+        ap = await _ask_from_list(f"2/5 — **Application profile** in `{tenant}`:", aps)
+        if ap is None:
+            return False
+        vrf = await _ask_from_list(f"3/5 — **VRF** for the new BD(s):",
+                                   await epg_admin_choices(fabric, "vrfs", tenant))
+        if vrf is None:
+            return False
+
+        subnets = {}
+        for e in epgs:
+            while True:
+                text = await _ask_text(
+                    f"4/5 — **Subnet** for `{e['name']}`: gateway/mask (e.g. 10.1.1.1/24), "
+                    "or `none` for an L2-only BD (unicast routing off).")
+                if text is None:
+                    return False
+                if text.lower() in ("none", "yok", "no", "-"):
+                    break
+                try:
+                    ip = validate_subnet(text)
+                except ValueError as ex:
+                    await cl.Message(content=f"⚠️ {ex}").send()
+                    continue
+                scope = await _ask_choice(f"Scope of `{ip}`:", list(SUBNET_SCOPES))
+                if scope is None:
+                    return False
+                subnets[e["base"]] = {"ip": ip, "scope": scope}
+                break
+
+        domains = {d["dn"]: d for r in plan["epg_requests"] for d in r.get("domains", [])}
+        all_domains = None
+        while True:
+            current = ", ".join(f"`{d['name']}` ({d['kind']})" for d in domains.values()) or "(none)"
+            choice = await _ask_choice(
+                f"5/5 — **Domains**: {current}",
+                [("done", "✅ Done"), ("add", "➕ Add domain")]
+                + [(f"rm:{dn}", f"➖ {d['name']}") for dn, d in domains.items()])
+            if choice is None:
+                return False
+            if choice == "done":
+                break
+            if choice.startswith("rm:"):
+                domains.pop(choice[3:], None)
+                continue
+            all_domains = all_domains or await epg_admin_choices(fabric, "domains")
+            options = {f"{d['name']} ({d['kind']})": d for d in all_domains if d["dn"] not in domains}
+            picked = await _ask_from_list("Domain to add:", list(options))
+            if picked:
+                domains[options[picked]["dn"]] = options[picked]
+    except Exception as ex:
+        await cl.Message(content=f"⚠️ Could not read choices from APIC: {ex}").send()
+        return False
+
+    vrf_name = vrf.split("/", 1)[1] if vrf.startswith("common/") else vrf
+    lines = [f"**Summary** — tenant `{tenant}`, AP `{ap}`, VRF `{vrf}`"]
+    for e in epgs:
+        sub = subnets.get(e["base"])
+        lines.append(f"- `{e['name']}` (vlan-{e['vlan']}): "
+                     + (f"subnet `{sub['ip']}` {sub['scope']}, unicast routing ON" if sub
+                        else "no subnet, unicast routing OFF"))
+    lines.append("- Domains: " + (", ".join(d["name"] for d in domains.values()) or "(none)"))
+    lines.append("\nVLANs are re-checked and marked in use on the VLAN API when applied.")
+    if await _ask_choice("\n".join(lines), [("apply", "✅ Apply")]) != "apply":
+        return False
+    plan["epg_admin"] = {"tenant": tenant, "ap": ap, "vrf": vrf_name, "subnets": subnets,
+                         "domains": list(domains.values())}
+    return True
