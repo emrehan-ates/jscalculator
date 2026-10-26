@@ -38,11 +38,11 @@ own attributes plus its first-hop relations. Contracts are out of scope
 - Attributes: `pcEnfPref`, `pcEnfDir`, `descr`.
 - Reverse: BDs → `and(eq(fvRsCtx.tnFvCtxName,"V"),wcard(fvRsCtx.dn,"uni/tn-T/"))`; L3Outs → `l3extRsEctx` with `tnFvCtxName`.
 
-### Application profile — `fvAP` (`uni/tn-T/ap-A`)
+### Application profile — `fvAp` (`uni/tn-T/ap-A`)
 - `rsp-subtree=children&rsp-subtree-class=fvAEPg` → EPG list (+ count).
 
 ### Tenant — `fvTenant` (`uni/tn-T`)
-- `rsp-subtree=children&rsp-subtree-class=fvCtx,fvBD,fvAP,l3extOut` → counts and names per type. For EPG count use `/api/node/class/fvAEPg.json?query-target-filter=wcard(fvAEPg.dn,"uni/tn-T/")&page-size=1` (`totalCount`).
+- `rsp-subtree=children&rsp-subtree-class=fvCtx,fvBD,fvAp,l3extOut` → counts and names per type. For EPG count use `/api/node/class/fvAEPg.json?query-target-filter=wcard(fvAEPg.dn,"uni/tn-T/")&page-size=1` (`totalCount`).
 
 ### L3Out — `l3extOut`: brief summary only (VRF, L3 domain, node profiles, external EPGs); routing detail → **aci_l3out_troubleshooting**.
 

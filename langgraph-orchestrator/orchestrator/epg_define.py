@@ -104,7 +104,7 @@ async def _children(tenant, cls):
 
 
 async def list_aps(tenant):
-    return await _children(tenant, "fvAP")
+    return await _children(tenant, "fvAp")
 
 
 async def list_vrfs(tenant):

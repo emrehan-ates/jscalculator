@@ -19,7 +19,7 @@ relations, and aci_epg_bindings for EPG static bindings.
 | tenant | fvTenant | uni/tn-NAME |
 | VRF / context / private network | fvCtx | uni/tn-T/ctx-NAME |
 | bridge domain / BD | fvBD | uni/tn-T/BD-NAME |
-| application profile / AP | fvAP | uni/tn-T/ap-NAME |
+| application profile / AP | fvAp | uni/tn-T/ap-NAME |
 | EPG | fvAEPg | uni/tn-T/ap-AP/epg-NAME |
 | subnet / gateway | fvSubnet | under a BD or EPG |
 | endpoint / host / MAC | fvCEp | learned endpoint (query by MAC) |

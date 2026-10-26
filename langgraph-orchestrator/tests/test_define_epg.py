@@ -292,3 +292,19 @@ class BatchFormTests(unittest.TestCase):
         self.assertEqual(plan["intent"], "batch")
         self.assertEqual(plan["epg_requests"][0]["epgs"][0]["name"], "APP_105")
         self.assertEqual(plan["post_body"]["polUni"]["children"], [])
+
+
+class WizardListTests(unittest.TestCase):
+    def test_application_profiles_use_fvAp_class(self):
+        seen = []
+
+        async def fake_get(path, params=None):
+            seen.append((path, params))
+            cls = params["target-subtree-class"]
+            return [{cls: {"attributes": {"name": "ODM_CSY_LAN"}}}]
+
+        with mock.patch.object(epg_define, "_apic_get", fake_get):
+            aps = run(epg_define.list_aps("Subsidiary"))
+        self.assertEqual(aps, ["ODM_CSY_LAN"])
+        self.assertEqual(seen[0], ("/api/node/mo/uni/tn-Subsidiary.json",
+                                   {"query-target": "children", "target-subtree-class": "fvAp"}))
