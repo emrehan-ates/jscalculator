@@ -5,8 +5,9 @@ Config (.env):
   VLAN_API_USERNAME   VLAN Desk site account (not the APIC account)
   VLAN_API_PASSWORD
   VLAN_API_TIMEOUT    seconds, default 15
-Each fabric's environment id (APIC_EVM_BANKA, APIC_KKB_ISTIRAK, ...) comes
-from FABRIC_<n>_VLAN_SOURCE (fabric["vlan_source"]).
+A new VLAN must be free on EVERY environment the API knows (all APICs,
+Core L3s and DCIs): queries send all source ids, and the API returns their
+intersection. A pool is optional; with no pool the whole VLAN range counts.
 
 The API uses a session cookie (no token): every public call opens a client,
 logs in, does its work and closes. Querying never reserves; a reservation is
@@ -110,26 +111,37 @@ def match_pool(user_text, pool_ids):
     return None, f"VLAN pool '{user_text}' is ambiguous: {', '.join(fuzzy)}"
 
 
-async def resolve_pool(user_text, source):
-    """Check the fabric source exists and resolve the pool id."""
+async def list_pools():
+    async with _Session() as s:
+        data = await s.call("GET", "/api/sources")
+    return _ids(data.get("pools"))
+
+
+async def resolve_scope(pool_text=None):
+    """(sources, pool) for a new VLAN: every environment the API knows, and the
+    pool the user/admin named (None = no pool filter). The DIB pool is only
+    valid for İştirak environments, so the Banka APICs are left out with it
+    (API guide: sending them with DIB silently returns nothing)."""
     async with _Session() as s:
         data = await s.call("GET", "/api/sources")
     sources = _ids(data.get("sources"))
-    if source not in sources:
-        raise VlanApiError(f"VLAN source '{source}' not found on the VLAN API "
-                           f"(available: {', '.join(sources)})")
-    pool, err = match_pool(user_text, _ids(data.get("pools")))
-    if err:
-        raise VlanApiError(err)
-    if pool.upper().startswith("DIB") and source in _DIB_EXCLUDED_SOURCES:
-        raise VlanApiError(f"The {pool} pool cannot be used on {source} (DIB VLANs are only "
-                           "for İştirak fabrics).")
-    return pool
+    if not sources:
+        raise VlanApiError("the VLAN API returned no environments")
+    pool = None
+    if pool_text and str(pool_text).strip().lower() not in ("none", "any", "yok", "-"):
+        pool, err = match_pool(pool_text, _ids(data.get("pools")))
+        if err:
+            raise VlanApiError(err)
+        if pool.upper().startswith("DIB"):
+            sources = [s for s in sources if s not in _DIB_EXCLUDED_SOURCES]
+    return sources, pool
 
 
-async def free_vlans(source, pool, limit=None):
-    """Free VLAN ids (ascending) in `pool` on `source`."""
-    params = {"source": source, "pool": pool}
+async def free_vlans(sources, pool=None, limit=None):
+    """VLAN ids (ascending) free on ALL `sources`, optionally inside `pool`."""
+    params = {"source": ",".join(sources)}
+    if pool:
+        params["pool"] = pool
     if limit:
         params["limit"] = int(limit)
     async with _Session() as s:
@@ -137,12 +149,13 @@ async def free_vlans(source, pool, limit=None):
     return [int(v) for v in data.get("vlans", [])]
 
 
-async def reserve(vlan, source, pool, note):
+async def reserve(vlan, sources, pool, note):
     """Mark a VLAN in use. Raises VlanConflict if it is no longer free."""
+    body = {"vlan_id": int(vlan), "source_ids": list(sources), "note": str(note)[:180]}
+    if pool:
+        body["pool_ids"] = [pool]
     async with _Session() as s:
-        await s.call("POST", "/api/reservations", json={
-            "vlan_id": int(vlan), "source_ids": [source], "pool_ids": [pool],
-            "note": str(note)[:180]})
+        await s.call("POST", "/api/reservations", json=body)
 
 
 async def release(vlan):

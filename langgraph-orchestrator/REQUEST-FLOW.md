@@ -1092,16 +1092,18 @@ Tek create'lik istek bugunku plan gorunumuyle ayni sekilde onaya gider.
 
 ## EPG Tanimlama (`define_epg`, `orchestrator/epg_define.py`)
 
-- **Istek**: kullanici EPG taban ad(lar)ini ve VLAN havuzunu verir (istege
-  bagli domain'ler). VLAN Desk API'den (`vlan_api.py`) chat profilinin
-  fabric'ine ait source (`FABRIC_<n>_VLAN_SOURCE`) ve havuzdan istenen sayida
-  bos VLAN alinir; ad `<TABAN>_<VLAN>` olur, BD ayni adla acilir. Bu asamada
-  VLAN rezerve edilmez. APIC'te ayni adli EPG varsa istek durur.
+- **Istek**: kullanici EPG taban ad(lar)ini verir; havuz ve domain istege
+  baglidir. VLAN Desk API'den (`vlan_api.py`) API'nin bildigi TUM ortamlarda
+  (butun APIC / Core L3 / DCI) bos olan VLAN'lar alinir (havuz verildiyse o
+  havuz icinden; DIB havuzunda Banka APIC'leri sorgudan cikarilir). Ad
+  `<TABAN>_<VLAN>` olur, BD ayni adla acilir. Bu asamada VLAN rezerve
+  edilmez. APIC'te ayni adli EPG varsa istek durur.
 - **Plan** her zaman batch formundadir (`plan.epg_requests`). Ayni istekteki
   bind gibi gorevler EPG'ye bagimli sonraki asamaya alinir ve EPG'yi taban
   adiyla anar.
-- **Admin onayi** (`chainlit_app._collect_epg_admin_input`): APIC'ten gelen
-  butonlarla tenant -> AP -> VRF (tenant + common), her EPG icin subnet
+- **Admin onayi** (`chainlit_app._collect_epg_admin_input`): once VLAN havuzu
+  (koru / baska havuz / havuz yok — degisirse yeni VLAN ve adlar secilir),
+  sonra APIC'ten gelen butonlarla tenant -> AP -> VRF (tenant + common), her EPG icin subnet
   (gateway/mask, `none` = L2) ve scope, domain ekle/cikar, ozet ve onay
   -> `plan.epg_admin`.
 - **Uygulama** (`batch.execute_batch`): her VLAN once VLAN API'de rezerve edilir

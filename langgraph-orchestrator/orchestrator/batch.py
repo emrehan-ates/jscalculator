@@ -329,7 +329,6 @@ async def prepare_create_batch(tasks, user_input, team="", convention=None, fabr
         "post_path": "/api/node/mo/uni.json",
         "post_body": body,
         "batch": {"team": team, "convention": convention,
-                  "vlan_source": (fabric or {}).get("vlan_source", ""),
                   "stage0_tasks": [p["task"] for p in preps],
                   "pending": later},
         "epg_requests": epg_requests,
@@ -386,7 +385,7 @@ async def _epg_children(plan, lines, trail):
         if err:
             return [], renames, reserved, f"VLAN reservation failed: {err}"
         children.extend(await epg_define.build_tree(epgs, admin))
-        trail.append(f"define_epg: reserved {res} on {req['source']}/{req['pool']}")
+        trail.append(f"define_epg: reserved {res} (pool {req.get('pool') or 'none'})")
         moved = {o: n for o, n in ren.items() if o != n.rsplit("_", 1)[0]}
         if moved:
             lines.append("VLAN taken since the request — renamed: "
@@ -433,11 +432,10 @@ async def execute_batch(plan):
         if reserved:
             lines.append(f"VLANs marked in use on the VLAN API: {reserved}")
         pending = _rename_epgs(batch.get("pending", []), renames)
-        fabric = {"vlan_source": batch.get("vlan_source", "")}
         for k, stage in enumerate(sorted({t["stage"] for t in pending}), start=2):
             tasks = [t for t in pending if t["stage"] == stage]
             preps, errors = await _prepare_stage(tasks, user_input, batch.get("team", ""),
-                                                 batch.get("convention"), fabric)
+                                                 batch.get("convention"))
             if errors:
                 err = "; ".join(errors)
                 result = {"error": f"stage {k} could not be prepared: {err}"}

@@ -17,14 +17,17 @@ class FakeVlanApi:
         self.taken = set(taken)       # reserved by someone else since the request
         self.reserved, self.released = [], []
 
-    async def resolve_pool(self, text, source):
-        return vlan_api.match_pool(text, ["Legacy_Vlans", "Static_Vlans", "DIB_VLAN"])[0]
+    async def resolve_scope(self, text=None):
+        self.scope_calls = getattr(self, "scope_calls", []) + [text]
+        pool = vlan_api.match_pool(text, ["Legacy_Vlans", "Static_Vlans", "DIB_VLAN"])[0] if text else None
+        return ["APIC_EVM_BANKA", "ESY_DCI"], pool
 
-    async def free_vlans(self, source, pool, limit=None):
+    async def free_vlans(self, sources, pool=None, limit=None):
+        self.queries = getattr(self, "queries", []) + [(tuple(sources), pool)]
         free = [v for v in self.free if v not in self.taken and v not in self.reserved]
         return free[:limit] if limit else free
 
-    async def reserve(self, vlan, source, pool, note):
+    async def reserve(self, vlan, sources, pool, note):
         if vlan in self.taken or vlan in self.reserved:
             raise vlan_api.VlanConflict("taken")
         self.reserved.append(vlan)
@@ -35,7 +38,7 @@ class FakeVlanApi:
 
 def patch_vlan(fake):
     return [mock.patch.object(vlan_api, n, getattr(fake, n))
-            for n in ("resolve_pool", "free_vlans", "reserve", "release")]
+            for n in ("resolve_scope", "free_vlans", "reserve", "release")]
 
 
 async def no_apic(path, params=None):
@@ -52,12 +55,12 @@ class PoolTests(unittest.TestCase):
 
 
 class PrepareTests(unittest.TestCase):
-    def prepare(self, params, fake, fabric={"vlan_source": "APIC_EVM_ISTIRAK"}):
+    def prepare(self, params, fake):
         ps = patch_vlan(fake) + [mock.patch.object(epg_define, "_apic_get", no_apic)]
         for p in ps:
             p.start()
         try:
-            return run(epg_define.prepare_define_epg(params, "req", fabric))
+            return run(epg_define.prepare_define_epg(params, "req"))
         finally:
             for p in ps:
                 p.stop()
@@ -68,13 +71,27 @@ class PrepareTests(unittest.TestCase):
         self.assertFalse(prep["errors"])
         req = prep["epg_request"]
         self.assertEqual([e["name"] for e in req["epgs"]], ["MSY_APP_105", "MSY_DB_118"])
-        self.assertEqual((req["pool"], req["source"]), ("Legacy_Vlans", "APIC_EVM_ISTIRAK"))
+        self.assertEqual(req["pool"], "Legacy_Vlans")
+        self.assertEqual(req["sources"], ["APIC_EVM_BANKA", "ESY_DCI"])
 
-    def test_not_enough_vlans_and_missing_source(self):
+    def test_pool_is_optional(self):
+        fake = FakeVlanApi([7, 8])
+        prep = self.prepare({"epgs": ["A"]}, fake)
+        self.assertIsNone(prep["epg_request"]["pool"])
+        self.assertEqual(fake.queries, [(("APIC_EVM_BANKA", "ESY_DCI"), None)])
+
+    def test_not_enough_vlans(self):
         prep = self.prepare({"epgs": ["A", "B"], "pool": "legacy"}, FakeVlanApi([105]))
-        self.assertIn("only 1 free VLAN", prep["errors"][0])
-        prep = self.prepare({"epgs": ["A"], "pool": "legacy"}, FakeVlanApi([105]), fabric={})
-        self.assertIn("VLAN API source", prep["errors"][0])
+        self.assertIn("only 1 VLAN(s) free on every environment", prep["errors"][0])
+
+    def test_admin_changes_pool(self):
+        fake = FakeVlanApi([300, 301])
+        req = {"epgs": [{"base": "A", "vlan": 105, "name": "A_105"}], "pool": "Legacy_Vlans",
+               "sources": ["X"], "domains": []}
+        with patch_vlan(fake)[0], patch_vlan(fake)[1]:
+            run(epg_define.change_pool(req, "static"))
+        self.assertEqual(req["pool"], "Static_Vlans")
+        self.assertEqual(req["epgs"][0]["name"], "A_300")
 
 
 ADMIN = {"tenant": "Subsidiary", "ap": "ODM_CSY_LAN", "vrf": "LAN",
@@ -123,10 +140,9 @@ class ExecuteTests(unittest.TestCase):
                 "post_body": {"polUni": {"attributes": {}, "children": []}}, "trail": [],
                 "approval_ref": "#7", "epg_admin": dict(ADMIN, domains=[]),
                 "epg_requests": [{"epgs": [{"base": "APP", "vlan": 105, "name": "APP_105"}],
-                                  "pool": "Legacy_Vlans", "source": "APIC_EVM_ISTIRAK",
+                                  "pool": "Legacy_Vlans", "sources": ["APIC_EVM_BANKA"],
                                   "domains": [], "task": {"id": 1}}],
-                "batch": {"stage0_tasks": [{"id": 1, "summary": "epg"}], "pending": list(pending),
-                          "vlan_source": "APIC_EVM_ISTIRAK"}}
+                "batch": {"stage0_tasks": [{"id": 1, "summary": "epg"}], "pending": list(pending)}}
 
     def execute(self, plan, fake, post_results, prepare=None):
         posts = []
@@ -211,7 +227,9 @@ class VlanApiClientTests(unittest.TestCase):
             if request.headers.get("cookie") != "session=abc":
                 return httpx.Response(401, json={"error": "login required"})
             if request.url.path == "/api/sources":
-                return httpx.Response(200, json={"sources": [{"id": "APIC_EVM_BANKA"}],
+                return httpx.Response(200, json={"sources": [{"id": "APIC_EVM_BANKA"},
+                                                             {"id": "APIC_EVM_ISTIRAK"},
+                                                             {"id": "ESY_DCI"}],
                                                  "pools": [{"id": "Legacy_Vlans"}, {"id": "DIB_VLAN"}]})
             if request.url.path == "/api/vlans":
                 return httpx.Response(200, json={"vlans": [105, 118]})
@@ -235,15 +253,22 @@ class VlanApiClientTests(unittest.TestCase):
             p.stop()
 
     def test_flow(self):
-        self.assertEqual(run(vlan_api.resolve_pool("legacy", "APIC_EVM_BANKA")), "Legacy_Vlans")
-        with self.assertRaises(vlan_api.VlanApiError):
-            run(vlan_api.resolve_pool("dib", "APIC_EVM_BANKA"))   # DIB not on Banka
-        self.assertEqual(run(vlan_api.free_vlans("APIC_EVM_BANKA", "Legacy_Vlans", 2)), [105, 118])
-        run(vlan_api.reserve(105, "APIC_EVM_BANKA", "Legacy_Vlans", "NetworkGPT #7 APP_105"))
+        everywhere = ["APIC_EVM_BANKA", "APIC_EVM_ISTIRAK", "ESY_DCI"]
+        self.assertEqual(run(vlan_api.resolve_scope("legacy")), (everywhere, "Legacy_Vlans"))
+        self.assertEqual(run(vlan_api.resolve_scope(None)), (everywhere, None))
+        # DIB: the Banka APICs are left out of the query
+        self.assertEqual(run(vlan_api.resolve_scope("dib")),
+                         (["APIC_EVM_ISTIRAK", "ESY_DCI"], "DIB_VLAN"))
+        self.assertEqual(run(vlan_api.free_vlans(everywhere, None, 2)), [105, 118])
+        query = [c for c in self.calls if c[1] == "/api/vlans"][0]
+        self.assertIsNone(query[2])  # no pool filter sent
+        run(vlan_api.reserve(105, everywhere, None, "NetworkGPT #7 APP_105"))
         with self.assertRaises(vlan_api.VlanConflict):
-            run(vlan_api.reserve(118, "APIC_EVM_BANKA", "Legacy_Vlans", "x"))
-        body = [c[3] for c in self.calls if c[1] == "/api/reservations"][0]
-        self.assertEqual(json.loads(body)["source_ids"], ["APIC_EVM_BANKA"])
+            run(vlan_api.reserve(118, everywhere, "Legacy_Vlans", "x"))
+        bodies = [json.loads(c[3]) for c in self.calls if c[1] == "/api/reservations"]
+        self.assertEqual(bodies[0]["source_ids"], everywhere)
+        self.assertNotIn("pool_ids", bodies[0])
+        self.assertEqual(bodies[1]["pool_ids"], ["Legacy_Vlans"])
 
     def test_not_configured(self):
         with mock.patch.dict("os.environ", {"VLAN_API_URL": ""}):
@@ -256,15 +281,14 @@ class BatchFormTests(unittest.TestCase):
         prep = {"flow": "create", "intent": "define_epg", "target_class": "EPG + BD (1)",
                 "payload": {"epgs": ["APP_105"]}, "errors": [], "trail": [],
                 "epg_request": {"epgs": [{"base": "APP", "vlan": 105, "name": "APP_105"}],
-                                "pool": "Legacy_Vlans", "source": "S", "domains": []}}
+                                "pool": "Legacy_Vlans", "sources": ["S"], "domains": []}}
 
         async def fake_prepare(task, *a, **k):
             return dict(prep)
         tasks = [{"id": 1, "intent": "define_epg", "flow": "create", "summary": "epg",
                   "stage": 0, "params": {}, "depends_on": []}]
         with mock.patch("orchestrator.supervisor.prepare_create_task", fake_prepare):
-            plan = run(batch.prepare_create_batch(tasks, "req", fabric={"vlan_source": "S"}))
+            plan = run(batch.prepare_create_batch(tasks, "req"))
         self.assertEqual(plan["intent"], "batch")
         self.assertEqual(plan["epg_requests"][0]["epgs"][0]["name"], "APP_105")
         self.assertEqual(plan["post_body"]["polUni"]["children"], [])
-        self.assertEqual(plan["batch"]["vlan_source"], "S")

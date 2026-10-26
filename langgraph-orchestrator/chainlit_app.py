@@ -37,7 +37,8 @@ from chainlit.server import app as chainlit_server
 
 from orchestrator.supervisor import (decompose as decompose_request, epg_admin_choices,
                                      execute_create, prepare_creates, run_agentic_task)
-from orchestrator.epg_define import SUBNET_SCOPES, validate_subnet
+from orchestrator.epg_define import SUBNET_SCOPES, change_pool, validate_subnet
+from orchestrator.vlan_api import VlanApiError, list_pools
 from orchestrator.chat_memory import (
     append_chat_turn,
     normalize_chat_history,
@@ -117,8 +118,6 @@ def _fabric_config(fid: int) -> dict:
         # Each fabric has its OWN APIC_CLIENT MCP server deployment.
         "apic_client_python": g("APIC_CLIENT_PYTHON", ""),
         "apic_client_server": g("APIC_CLIENT_SERVER", ""),
-        # VLAN Desk API environment id of this fabric (e.g. APIC_EVM_BANKA).
-        "vlan_source": g("VLAN_SOURCE", ""),
     }
 
 def _all_fabrics() -> list[dict]:
@@ -141,7 +140,6 @@ def _all_fabrics() -> list[dict]:
             "icon": None,
             "apic_client_python": os.environ.get("APIC_CLIENT_PYTHON", ""),
             "apic_client_server": os.environ.get("APIC_CLIENT_SERVER", ""),
-            "vlan_source": os.environ.get("VLAN_SOURCE", ""),
         })
     return fabrics
 
@@ -832,10 +830,25 @@ async def _ask_from_list(prompt, values):
 async def _collect_epg_admin_input(plan, fabric) -> bool:
     """Ask the admin for the define_epg decisions and store them in
     plan["epg_admin"]. False when the admin cancels."""
-    epgs = [e for r in plan["epg_requests"] for e in r["epgs"]]
-    await cl.Message(content="**New EPG(s) need your decisions:** "
-                             + ", ".join(f"`{e['name']}`" for e in epgs)).send()
+    def names():
+        return ", ".join(f"`{e['name']}`" for r in plan["epg_requests"] for e in r["epgs"])
+
+    await cl.Message(content=f"**New EPG(s) need your decisions:** {names()}").send()
     try:
+        current = plan["epg_requests"][0].get("pool") or "none"
+        choice = await _ask_choice(
+            f"0/5 — **VLAN pool**: `{current}`. VLANs are free on every VLAN API environment"
+            + (f" inside `{current}`." if current != "none" else " (no pool filter)."),
+            [("__keep__", "✅ Keep")] + [(p, p) for p in await list_pools() if p != current]
+            + ([("none", "No pool")] if current != "none" else []))
+        if choice is None:
+            return False
+        if choice != "__keep__":
+            for req in plan["epg_requests"]:
+                await change_pool(req, choice)
+            await cl.Message(content=f"New VLANs from `{choice}`: {names()}").send()
+
+        epgs = [e for r in plan["epg_requests"] for e in r["epgs"]]
         tenant = await _ask_from_list("1/5 — **Tenant**:", await epg_admin_choices(fabric, "tenants"))
         if tenant is None:
             return False
@@ -892,12 +905,16 @@ async def _collect_epg_admin_input(plan, fabric) -> bool:
             picked = await _ask_from_list("Domain to add:", list(options))
             if picked:
                 domains[options[picked]["dn"]] = options[picked]
+    except VlanApiError as ex:
+        await cl.Message(content=f"⚠️ VLAN API: {ex}").send()
+        return False
     except Exception as ex:
         await cl.Message(content=f"⚠️ Could not read choices from APIC: {ex}").send()
         return False
 
     vrf_name = vrf.split("/", 1)[1] if vrf.startswith("common/") else vrf
-    lines = [f"**Summary** — tenant `{tenant}`, AP `{ap}`, VRF `{vrf}`"]
+    pool = plan["epg_requests"][0].get("pool") or "none"
+    lines = [f"**Summary** — tenant `{tenant}`, AP `{ap}`, VRF `{vrf}`, VLAN pool `{pool}`"]
     for e in epgs:
         sub = subnets.get(e["base"])
         lines.append(f"- `{e['name']}` (vlan-{e['vlan']}): "

@@ -1,11 +1,13 @@
 """define_epg — new EPG(s), each with its own new bridge domain.
 
-Request (user): EPG base name(s), the VLAN pool, optionally domains.
-  -> free VLANs are taken from the VLAN Desk API for the chat profile's fabric
-     (fabric["vlan_source"]) and pool; final name = <BASE>_<VLAN> for both the
-     EPG and its BD. Nothing is reserved yet.
-Approval (admin, chainlit wizard): tenant, AP, VRF, per-EPG subnet + scope,
-  domain additions/removals -> plan["epg_admin"].
+Request (user): EPG base name(s), optionally a VLAN pool and domains.
+  -> free VLANs are taken from the VLAN Desk API: free on EVERY environment it
+     knows (all APICs / Core L3 / DCI), inside the pool if one was given;
+     final name = <BASE>_<VLAN> for both the EPG and its BD. Nothing is
+     reserved yet.
+Approval (admin, chainlit wizard): VLAN pool (keep / change / none — a change
+  picks new VLANs and names), tenant, AP, VRF, per-EPG subnet + scope, domain
+  additions/removals -> plan["epg_admin"].
 Execution (batch.execute_batch -> allocate_and_build):
   each VLAN is reserved on the VLAN API first (a 409 means someone took it:
   the next free VLAN is used and the EPG/BD renamed), then the EPG/BD tree is
@@ -150,22 +152,14 @@ async def prepare_define_epg(params, user_input, fabric=None):
     bad = [n for n in names if not NAME_RE.match(n)]
     if bad:
         return _err(user_input, f"invalid EPG name(s): {', '.join(bad)}")
-    source = (fabric or {}).get("vlan_source") or ""
-    if not source:
-        return _err(user_input, "this fabric has no VLAN API source configured "
-                                "(FABRIC_<n>_VLAN_SOURCE)")
     trail = []
     try:
-        pool = await vlan_api.resolve_pool(params.get("pool") or params.get("vlan_pool"), source)
-        vlans = await vlan_api.free_vlans(source, pool, limit=len(names))
+        sources, pool = await vlan_api.resolve_scope(params.get("pool") or params.get("vlan_pool"))
+        epgs = await pick_vlans(names, sources, pool)
     except vlan_api.VlanApiError as e:
         return _err(user_input, str(e), trail)
-    trail.append(f"{INTENT}: VLAN API {source}/{pool} -> free {vlans}")
-    if len(vlans) < len(names):
-        return _err(user_input, f"only {len(vlans)} free VLAN(s) in {pool} on {source}, "
-                                f"{len(names)} needed", trail)
-
-    epgs = [{"base": b, "vlan": v, "name": f"{b}_{v}"} for b, v in zip(names, vlans)]
+    trail.append(f"{INTENT}: VLAN API pool={pool or '(none)'} on {len(sources)} environment(s) "
+                 f"-> {[e['vlan'] for e in epgs]}")
     try:
         flt = "or(" + ",".join(f'eq(fvAEPg.name,"{e["name"]}")' for e in epgs) + ")"
         taken = [_attr(i, "fvAEPg").get("name") for i in
@@ -182,14 +176,16 @@ async def prepare_define_epg(params, user_input, fabric=None):
         return _err(user_input, f"EPG(s) already exist on APIC: {', '.join(taken)} — the VLAN API "
                                 "may be out of date for this fabric", trail)
 
-    request = {"epgs": epgs, "pool": pool, "source": source, "domains": domains}
+    request = {"epgs": epgs, "pool": pool, "sources": sources, "domains": domains}
     return {
         "flow": "create", "intent": INTENT, "user_input": user_input,
         "target_class": f"EPG + BD ({len(epgs)})",
         "dn": "uni (tenant / AP / VRF chosen by the admin at approval)",
         "payload": {
             "epgs": [f"{e['name']} (vlan-{e['vlan']}, BD {e['name']})" for e in epgs],
-            "vlan_pool": f"{pool} on {source} (re-checked and reserved at approval)",
+            "vlan_pool": (f"{pool}" if pool else "(no pool — any VLAN)")
+                         + " — free on every VLAN API environment; re-checked and reserved "
+                           "when applied",
             "domains": [f"{d['name']} ({d['kind']})" for d in domains] or "(admin decides)",
             "admin_decides": ["tenant", "application profile", "VRF", "subnet + scope per EPG",
                               "domains"],
@@ -198,6 +194,24 @@ async def prepare_define_epg(params, user_input, fabric=None):
         "errors": [],
         "trail": trail + [f"{INTENT}: {', '.join(e['name'] for e in epgs)}"],
     }
+
+
+async def pick_vlans(names, sources, pool):
+    """[{base, vlan, name}] with one free VLAN per base name."""
+    vlans = await vlan_api.free_vlans(sources, pool, limit=len(names))
+    if len(vlans) < len(names):
+        raise vlan_api.VlanApiError(
+            f"only {len(vlans)} VLAN(s) free on every environment"
+            + (f" in {pool}" if pool else "") + f", {len(names)} needed")
+    return [{"base": b, "vlan": v, "name": f"{b}_{v}"} for b, v in zip(names, vlans)]
+
+
+async def change_pool(request, pool_text):
+    """Admin picked another pool (or none): new VLANs and names, in place."""
+    sources, pool = await vlan_api.resolve_scope(pool_text)
+    request["epgs"] = await pick_vlans([e["base"] for e in request["epgs"]], sources, pool)
+    request["sources"], request["pool"] = sources, pool
+    return request
 
 
 def validate_subnet(text):
@@ -246,19 +260,20 @@ async def build_tree(epgs, admin):
 async def allocate(request, note):
     """Reserve every VLAN of the request on the VLAN API, re-picking any that
     were taken since the request. Returns (epgs, renames, reserved, error)."""
-    source, pool = request["source"], request["pool"]
+    sources, pool = request["sources"], request.get("pool")
     used = {e["vlan"] for e in request["epgs"]}
     epgs, renames, reserved = [], {}, []
     for e in request["epgs"]:
         cur = dict(e)
         for _ in range(5):
             try:
-                await vlan_api.reserve(cur["vlan"], source, pool, f"{note} {cur['name']}")
+                await vlan_api.reserve(cur["vlan"], sources, pool, f"{note} {cur['name']}")
                 break
             except vlan_api.VlanConflict:
-                free = [v for v in await vlan_api.free_vlans(source, pool) if v not in used]
+                free = [v for v in await vlan_api.free_vlans(sources, pool) if v not in used]
                 if not free:
-                    return epgs, renames, reserved, f"no free VLAN left in {pool} for {e['base']}"
+                    return epgs, renames, reserved, (f"no free VLAN left" + (f" in {pool}" if pool else "")
+                                                     + f" for {e['base']}")
                 cur = {"base": e["base"], "vlan": free[0], "name": f"{e['base']}_{free[0]}"}
                 used.add(free[0])
             except vlan_api.VlanApiError as ex:
